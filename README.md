@@ -3,8 +3,7 @@
 Backend for the F1 Historical Race Replay and Event Detection Engine. It loads
 historical Formula 1 race data (later phases), stores normalized domain models in
 PostgreSQL, and will replay races through a virtual clock with event detection
-exposed via FastAPI. This repository is Phase 1: project foundation, configuration,
-connectivity, and the initial persistence schema.
+exposed via FastAPI.
 
 ## Requirements
 
