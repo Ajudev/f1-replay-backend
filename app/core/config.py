@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     redis_url: str = Field(alias="REDIS_URL")
     api_host: str = Field(alias="API_HOST")
     api_port: int = Field(alias="API_PORT")
+    fastf1_cache_dir: str = Field(default=".fastf1-cache", alias="FASTF1_CACHE_DIR")
 
 
 @lru_cache

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 # Must run before importing app modules that call get_settings().
 os.environ.setdefault("APP_ENV", "test")
@@ -51,8 +52,12 @@ def anyio_backend() -> str:
 
 @pytest.fixture
 async def sqlite_engine() -> AsyncGenerator[AsyncEngine, None]:
-    """In-memory SQLite engine with foreign keys enabled."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    """In-memory SQLite engine with foreign keys enabled and a shared connection."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
 
     @event.listens_for(engine.sync_engine, "connect")
     def _enable_foreign_keys(dbapi_connection: object, _connection_record: object) -> None:

@@ -24,6 +24,7 @@ class Race(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     season: Mapped[int] = mapped_column(Integer, nullable=False)
     round: Mapped[int] = mapped_column(Integer, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    official_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     circuit_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     country: Mapped[str | None] = mapped_column(String(128), nullable=True)
     location: Mapped[str | None] = mapped_column(String(255), nullable=True)

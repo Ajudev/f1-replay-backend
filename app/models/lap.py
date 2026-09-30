@@ -25,7 +25,11 @@ if TYPE_CHECKING:
 
 
 class Lap(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """A single lap completed by a driver in a session."""
+    """A single lap completed by a driver in a session.
+
+    ``position`` is the lap-end classification position from FastF1
+    ``laps.Position``. It is not the starting grid or finishing result.
+    """
 
     __tablename__ = "laps"
     __table_args__ = (
@@ -54,6 +58,22 @@ class Lap(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "pit_duration_ms IS NULL OR pit_duration_ms >= 0",
             name="ck_laps_pit_duration_ms_ge_0",
         ),
+        CheckConstraint(
+            "stint_number IS NULL OR stint_number >= 1",
+            name="ck_laps_stint_number_ge_1",
+        ),
+        CheckConstraint(
+            "lap_start_time_ms IS NULL OR lap_start_time_ms >= 0",
+            name="ck_laps_lap_start_time_ms_ge_0",
+        ),
+        CheckConstraint(
+            "pit_in_time_ms IS NULL OR pit_in_time_ms >= 0",
+            name="ck_laps_pit_in_time_ms_ge_0",
+        ),
+        CheckConstraint(
+            "pit_out_time_ms IS NULL OR pit_out_time_ms >= 0",
+            name="ck_laps_pit_out_time_ms_ge_0",
+        ),
     )
 
     session_id: Mapped[UUID] = mapped_column(
@@ -67,6 +87,12 @@ class Lap(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     position: Mapped[int | None] = mapped_column(Integer, nullable=True)
     compound: Mapped[str | None] = mapped_column(String(32), nullable=True)
     tyre_age_laps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stint_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    is_deleted: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    is_accurate: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    lap_start_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pit_in_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pit_out_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_pit_in_lap: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

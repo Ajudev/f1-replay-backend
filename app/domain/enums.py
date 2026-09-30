@@ -41,3 +41,15 @@ class ReplayStatus(StrEnum):
     PAUSED = "PAUSED"
     COMPLETED = "COMPLETED"
     STOPPED = "STOPPED"
+
+
+class TrackStatus(StrEnum):
+    """Track status derived from FastF1 track-status codes."""
+
+    GREEN = "GREEN"
+    YELLOW = "YELLOW"
+    SAFETY_CAR = "SAFETY_CAR"
+    VIRTUAL_SAFETY_CAR = "VIRTUAL_SAFETY_CAR"
+    VIRTUAL_SAFETY_CAR_ENDING = "VIRTUAL_SAFETY_CAR_ENDING"
+    RED_FLAG = "RED_FLAG"
+    UNKNOWN = "UNKNOWN"
