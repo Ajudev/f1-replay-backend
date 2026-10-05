@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     Numeric,
+    Text,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -37,6 +38,10 @@ class ReplaySession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "current_sequence IS NULL OR current_sequence >= 0",
             name="ck_replay_sessions_current_sequence_ge_0",
         ),
+        CheckConstraint(
+            "current_lap IS NULL OR current_lap >= 1",
+            name="ck_replay_sessions_current_lap_ge_1",
+        ),
     )
 
     session_id: Mapped[UUID] = mapped_column(
@@ -53,8 +58,8 @@ class ReplaySession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             validate_strings=True,
         ),
         nullable=False,
-        default=ReplayStatus.PENDING,
-        server_default=text("'PENDING'"),
+        default=ReplayStatus.CREATED,
+        server_default=text("'CREATED'"),
     )
     playback_speed: Mapped[Decimal] = mapped_column(
         Numeric(6, 2),
@@ -68,9 +73,15 @@ class ReplaySession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default=0,
         server_default=text("0"),
     )
+    # Sequence of the last emitted timeline event; null until the first emission.
     current_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    current_lap: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_events: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_laps: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     session: Mapped["RaceSession"] = relationship(back_populates="replay_sessions")
 

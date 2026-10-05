@@ -35,13 +35,14 @@ class SessionType(StrEnum):
 
 
 class ReplayStatus(StrEnum):
-    """Replay session lifecycle status."""
+    """Replay session lifecycle status (transitions live in ``app.replay.state``)."""
 
-    PENDING = "PENDING"
+    CREATED = "CREATED"
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
-    COMPLETED = "COMPLETED"
     STOPPED = "STOPPED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
 
 
 class TrackStatus(StrEnum):

@@ -2,8 +2,9 @@
 
 Backend for the F1 Historical Race Replay and Event Detection Engine. It imports
 historical Formula 1 sessions via FastF1, stores normalized domain data in
-PostgreSQL, and exposes FastAPI endpoints to read that data. Replay, event
-detection, and streaming are not implemented yet.
+PostgreSQL, builds a deterministic event timeline, and replays it on a
+controllable virtual race clock. Event detection, streaming (Redis Streams) and
+WebSockets are not implemented yet.
 
 ## Requirements
 
@@ -213,6 +214,139 @@ excluded when `lap_from` / `lap_to` is used.
 - If the built timeline fails validation (inconsistent source data, e.g. a lap
   completing before the previous one), `POST` returns HTTP 422 with a `problems` list.
 - No detection (battles, pace) or replay timing is part of the timeline.
+
+## Race replay
+
+A replay releases a session's stored historical timeline (`race_events`) in
+`sequence` order as though the race were live. It never calls FastF1, never
+builds or re-sorts the timeline, and does no race-state processing or detection.
+Generate the timeline first (`POST /sessions/{id}/timeline`).
+
+### Lifecycle
+
+| Command | Allowed from | Result |
+|---------|--------------|--------|
+| create | — | `CREATED` |
+| start | `CREATED` | `RUNNING` |
+| pause | `RUNNING` | `PAUSED` |
+| resume | `PAUSED` | `RUNNING` |
+| stop | `RUNNING`, `PAUSED` | `STOPPED` |
+| restart | `RUNNING`, `PAUSED`, `STOPPED`, `COMPLETED`, `FAILED` | `RUNNING` |
+| (engine) complete | `RUNNING` | `COMPLETED` once the last event is emitted |
+| (engine) fail | `RUNNING`, `PAUSED` | `FAILED` when emission raises (`PAUSED` only when a pause lands while a publish is in flight and that publish then raises) |
+
+Any other command, including a repeat of the same command (start twice, pause
+twice, stop twice), returns HTTP 409 with `current_status` and changes nothing.
+
+- **Stop** terminates the replay. It cannot be resumed; use restart to run it again.
+  An event already being published when stop arrives is allowed to finish (up to
+  5 s; after that the worker is cancelled).
+- **Restart** resets race time, event pointer, current lap, pause and end state,
+  reloads the stored timeline (it never regenerates or duplicates it) and starts
+  running immediately. Playback speed is kept.
+- **Completion** freezes race time at the final event's time, records `ended_at`
+  and ends the background task.
+- **Failure** (the event publisher raised) records `FAILED` with `status_reason`.
+  The failing event is not counted as emitted; restart to run again.
+- **Backend restart**: execution is in-memory and does not survive a restart. On
+  startup every persisted `RUNNING`/`PAUSED` replay is marked `STOPPED` with
+  `status_reason` explaining it was interrupted; restart it explicitly. If the
+  database is unreachable at startup, the same repair happens the next time that
+  replay is read or commanded. On graceful shutdown live replays are stopped and
+  persisted as `STOPPED`.
+
+### Virtual clock and playback speed
+
+Race time is `anchor_race_time + (real_elapsed × playback_speed)`. Pause, resume
+and speed changes re-anchor at the current race time, so pausing freezes race time
+exactly and a speed change (running or paused) continues from the same race time.
+The engine sleeps until the next event is due on that clock (no fixed per-event or
+per-lap delays, no drift) and emits every already-due event back to back, so high
+speeds never reorder or delay events. A very large due batch yields to the event
+loop every 100 events, so a pause or stop issued meanwhile takes effect mid-batch.
+
+Supported speeds: `1`, `2`, `5`, `10`, `20`. Anything else (zero, negative,
+fractional, extreme) returns HTTP 422. Speed can be changed in any status;
+setting the current speed is a no-op.
+
+### Progress fields
+
+- `current_race_time_ms` — virtual race time (live while running).
+- `current_sequence` — sequence of the last emitted event (`null` before the
+  first); `emitted_event_count` = `current_sequence + 1`. Resume continues from
+  the next event, so nothing is emitted twice within a run.
+- `current_lap` — the race lap the leader is on: `1` once `RACE_STARTED` is
+  emitted, `n + 1` after the first `LAP_COMPLETED` for lap `n`, capped at
+  `total_laps` (highest completed lap in the timeline). Lapped cars never move it.
+
+### Multiple replays and concurrency
+
+Each replay has its own clock, event pointer, speed, status and background task,
+so any number of replays (including several of the same session) run
+independently. Every command for a replay is serialized by a per-replay lock, so
+concurrent starts launch exactly one worker. While a replay's worker exists its
+in-memory state is authoritative; PostgreSQL is written only at lifecycle
+boundaries (create, start, pause, resume, speed change, stop, restart, completion,
+failure), never per event or clock tick.
+
+Execution and locks are per-process: run the API with a single worker.
+
+### Database failures
+
+Every database failure in the replay service (reads included) returns HTTP 503
+`Replay storage unavailable`, or `Replay is <status> but the state is not saved
+yet` when only the write failed. No database transaction is held while waiting for
+a worker to stop.
+
+A 503 from pause, resume, speed change or stop means the in-memory change
+**applied** but is not yet durable. The in-memory state stays authoritative, so
+`GET /replays/{id}` reports the true state (it does not fail just because the
+deferred write failed), and repeating the command follows the normal rules (pause
+on a paused replay is 409). The unsaved state is written again on the next
+access to that replay (and on graceful shutdown). A stopped, completed or failed
+replay is always unregistered from memory even if its save fails; its terminal
+state is kept and reported, never replaced by the "interrupted" repair, and
+persisted on the next access. Start and restart are atomic: if their save fails
+nothing starts (503) and the replay is unchanged. A read that itself cannot reach
+the database is a plain 503.
+
+### Event emission
+
+The engine publishes each event as a `ReplayEvent` (replay id, session id,
+`sequence`, type, race time, lap, driver, payload) to a `ReplayEventSink`
+(`app/replay/events.py`), awaiting each publish in order. The engine does not know
+what backs the sink; the default only logs at DEBUG level. A streaming backend can
+implement the same interface.
+
+### Endpoints
+
+```bash
+# Create (201); playback_speed defaults to 1
+curl -X POST http://127.0.0.1:8000/replays \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id": "'$SESSION_ID'", "playback_speed": 5}'
+
+curl http://127.0.0.1:8000/replays/$REPLAY_ID
+curl -X POST http://127.0.0.1:8000/replays/$REPLAY_ID/start    # also pause, resume, stop, restart
+curl -X PUT http://127.0.0.1:8000/replays/$REPLAY_ID/speed \
+  -H 'Content-Type: application/json' -d '{"playback_speed": 10}'
+```
+
+Errors: 404 unknown replay or session; 409 invalid transition or no generated
+timeline; 422 unsupported speed; 503 database unavailable or state not saved yet (see
+"Database failures"; for pause/resume/speed/stop the in-memory change still
+applies and is reported by later reads).
+
+### Known limitations
+
+- Seek is not implemented. The clock can be positioned (`VirtualRaceClock.reset`)
+  and the event pointer is explicit, but seeking safely needs downstream state to
+  be rebuilt, so it is deferred.
+- Single process only (see above); no distributed locking.
+- Regenerating a timeline does not affect a running replay (it keeps the copy it
+  loaded); the new timeline is used on the next start/restart.
+- If a worker is cancelled after the stop timeout, the event being published at
+  that moment may or may not have reached the sink.
 
 ## Read endpoints
 

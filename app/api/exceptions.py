@@ -1,4 +1,4 @@
-"""HTTP exception handlers for ingestion and query errors."""
+"""HTTP exception handlers for ingestion, query, timeline and replay errors."""
 
 from __future__ import annotations
 
@@ -11,6 +11,13 @@ from app.ingestion.errors import (
     PersistenceError,
     SessionLoadError,
     SessionNotFoundError,
+)
+from app.replay.errors import (
+    InvalidPlaybackSpeedError,
+    InvalidReplayTransitionError,
+    ReplayNotFoundError,
+    ReplayPersistenceError,
+    ReplayTimelineUnavailableError,
 )
 from app.services.race_queries import RaceNotFoundError
 from app.services.race_queries import SessionNotFoundError as QuerySessionNotFoundError
@@ -111,3 +118,41 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=422, content={"detail": exc.message, "problems": exc.problems}
         )
+
+    @app.exception_handler(ReplayNotFoundError)
+    async def replay_not_found_handler(
+        _request: Request,
+        exc: ReplayNotFoundError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": exc.message})
+
+    @app.exception_handler(InvalidReplayTransitionError)
+    async def invalid_replay_transition_handler(
+        _request: Request,
+        exc: InvalidReplayTransitionError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": exc.message, "current_status": exc.current_status.value},
+        )
+
+    @app.exception_handler(InvalidPlaybackSpeedError)
+    async def invalid_playback_speed_handler(
+        _request: Request,
+        exc: InvalidPlaybackSpeedError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": exc.message})
+
+    @app.exception_handler(ReplayTimelineUnavailableError)
+    async def replay_timeline_unavailable_handler(
+        _request: Request,
+        exc: ReplayTimelineUnavailableError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": exc.message})
+
+    @app.exception_handler(ReplayPersistenceError)
+    async def replay_persistence_error_handler(
+        _request: Request,
+        exc: ReplayPersistenceError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": exc.message})

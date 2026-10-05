@@ -98,7 +98,7 @@ async def test_persist_tyre_stint_replay_and_event(db_session: AsyncSession) -> 
     db_session.add_all([stint, replay, event])
     await db_session.flush()
 
-    assert replay.status == ReplayStatus.PENDING
+    assert replay.status == ReplayStatus.CREATED
     assert replay.playback_speed == Decimal("1.00")
     assert event.payload == {"source": "test"}
 

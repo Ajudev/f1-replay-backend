@@ -203,6 +203,31 @@ class TimelineRepository:
         await self._session.flush()
         return _stored(row)
 
+    async def load_events(self, session_id: UUID) -> list[StoredEvent]:
+        """Every stored event for the session in ``sequence`` order (one query)."""
+        joined = RaceEvent.__table__.outerjoin(  # type: ignore[attr-defined]
+            Driver.__table__,  # type: ignore[attr-defined]
+            (RaceEvent.driver_id == Driver.id) & (RaceEvent.session_id == Driver.session_id),
+        )
+        rows = (
+            await self._session.execute(
+                select(
+                    RaceEvent.id,
+                    RaceEvent.sequence,
+                    RaceEvent.event_type,
+                    RaceEvent.race_time_ms,
+                    RaceEvent.lap_number,
+                    RaceEvent.driver_id,
+                    Driver.abbreviation,
+                    RaceEvent.payload,
+                )
+                .select_from(joined)
+                .where(RaceEvent.session_id == session_id)
+                .order_by(RaceEvent.sequence.asc())
+            )
+        ).all()
+        return [StoredEvent(*row) for row in rows]
+
     async def list_events(
         self,
         session_id: UUID,
