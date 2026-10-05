@@ -44,6 +44,7 @@ class ExtractedLap:
     is_deleted: bool | None
     is_accurate: bool | None
     team_name: str | None
+    lap_end_time_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +107,7 @@ class NormalizedLap:
     is_pit_in_lap: bool
     is_pit_out_lap: bool
     pit_duration_ms: int | None
+    lap_end_time_ms: int | None = None
     sectors: list[NormalizedSector] = field(default_factory=list)
 
 

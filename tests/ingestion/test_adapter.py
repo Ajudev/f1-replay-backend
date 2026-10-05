@@ -126,3 +126,24 @@ def test_sq_load_error_does_not_retry_ss(monkeypatch: pytest.MonkeyPatch) -> Non
         loader.load(2024, 1, SessionType.SPRINT_QUALIFYING)
 
     assert calls == ["SQ"]
+
+
+def test_extract_laps_reads_lap_end_time_from_time_column() -> None:
+    from datetime import timedelta
+
+    class _Laps:
+        def __len__(self) -> int:
+            return 1
+
+        def iterrows(self):  # noqa: ANN201
+            yield 0, {
+                "Driver": "NOR",
+                "LapNumber": 1,
+                "LapStartTime": timedelta(seconds=3600),
+                "Time": timedelta(seconds=3690, milliseconds=250),
+            }
+
+    loader = FastF1SessionLoader(cache_dir="/tmp/unused-fastf1-test-cache")
+    laps = loader._extract_laps(_Laps())
+    assert laps[0].lap_start_time_ms == 3_600_000
+    assert laps[0].lap_end_time_ms == 3_690_250

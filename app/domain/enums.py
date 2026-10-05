@@ -9,6 +9,7 @@ from enum import StrEnum
 class EventType(StrEnum):
     """Machine-readable race event types."""
 
+    RACE_STARTED = "RACE_STARTED"
     LAP_COMPLETED = "LAP_COMPLETED"
     SECTOR_COMPLETED = "SECTOR_COMPLETED"
     POSITION_CHANGED = "POSITION_CHANGED"

@@ -149,6 +149,7 @@ def normalize(extracted: ExtractedSession) -> NormalizedSession:
             is_pit_in_lap=pit_in is not None,
             is_pit_out_lap=pit_out is not None,
             pit_duration_ms=pit_duration,
+            lap_end_time_ms=lap.lap_end_time_ms,
             sectors=sectors,
         )
         laps.append(normalized_lap)

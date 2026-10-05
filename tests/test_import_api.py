@@ -82,6 +82,7 @@ def _sample() -> ExtractedSession:
                 sector2_time_ms=30_000,
                 sector3_time_ms=30_000,
                 lap_start_time_ms=0,
+                lap_end_time_ms=90_000,
                 is_deleted=False,
                 is_accurate=True,
                 team_name="McLaren",

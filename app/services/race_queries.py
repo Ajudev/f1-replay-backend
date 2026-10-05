@@ -209,6 +209,7 @@ class RaceQueryService:
                 is_deleted=lap.is_deleted,
                 is_accurate=lap.is_accurate,
                 lap_start_time_ms=lap.lap_start_time_ms,
+                lap_end_time_ms=lap.lap_end_time_ms,
                 pit_in_time_ms=lap.pit_in_time_ms,
                 pit_out_time_ms=lap.pit_out_time_ms,
                 is_pit_in_lap=lap.is_pit_in_lap,

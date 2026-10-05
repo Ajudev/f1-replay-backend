@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app.api.exceptions import register_exception_handlers
 from app.api.health import router as health_router
 from app.api.races import router as races_router
+from app.api.timeline import router as timeline_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.db.session import create_engine, create_session_factory
@@ -60,6 +61,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(application)
     application.include_router(health_router)
     application.include_router(races_router)
+    application.include_router(timeline_router)
     return application
 
 

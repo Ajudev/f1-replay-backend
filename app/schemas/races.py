@@ -130,6 +130,7 @@ class LapOut(BaseModel):
     is_deleted: bool | None
     is_accurate: bool | None
     lap_start_time_ms: int | None
+    lap_end_time_ms: int | None
     pit_in_time_ms: int | None
     pit_out_time_ms: int | None
     is_pit_in_lap: bool

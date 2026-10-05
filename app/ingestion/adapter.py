@@ -247,6 +247,7 @@ class FastF1SessionLoader:
                     is_deleted=clean_bool(_row_get(row, "Deleted")),
                     is_accurate=clean_bool(_row_get(row, "IsAccurate")),
                     team_name=clean_optional_str(_row_get(row, "Team")),
+                    lap_end_time_ms=timedelta_to_ms(_row_get(row, "Time")),
                 )
             )
         return extracted

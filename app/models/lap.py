@@ -67,6 +67,10 @@ class Lap(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_laps_lap_start_time_ms_ge_0",
         ),
         CheckConstraint(
+            "lap_end_time_ms IS NULL OR lap_end_time_ms >= 0",
+            name="ck_laps_lap_end_time_ms_ge_0",
+        ),
+        CheckConstraint(
             "pit_in_time_ms IS NULL OR pit_in_time_ms >= 0",
             name="ck_laps_pit_in_time_ms_ge_0",
         ),
@@ -91,6 +95,7 @@ class Lap(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_deleted: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     is_accurate: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     lap_start_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    lap_end_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pit_in_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pit_out_time_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_pit_in_lap: Mapped[bool] = mapped_column(

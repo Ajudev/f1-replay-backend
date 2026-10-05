@@ -174,6 +174,7 @@ class ImportRepository:
                 is_deleted=item.is_deleted,
                 is_accurate=item.is_accurate,
                 lap_start_time_ms=item.lap_start_time_ms,
+                lap_end_time_ms=item.lap_end_time_ms,
                 pit_in_time_ms=item.pit_in_time_ms,
                 pit_out_time_ms=item.pit_out_time_ms,
                 is_pit_in_lap=item.is_pit_in_lap,

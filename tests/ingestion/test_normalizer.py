@@ -85,6 +85,7 @@ def _lap(
         sector2_time_ms=sector2,
         sector3_time_ms=sector3,
         lap_start_time_ms=0,
+        lap_end_time_ms=67_000,
         is_deleted=False,
         is_accurate=True,
         team_name="McLaren",
@@ -179,6 +180,7 @@ def test_bad_abbreviation_skipped_with_laps() -> None:
                 sector2_time_ms=25_000,
                 sector3_time_ms=22_000,
                 lap_start_time_ms=0,
+                lap_end_time_ms=67_000,
                 is_deleted=False,
                 is_accurate=True,
                 team_name="McLaren",
@@ -276,3 +278,8 @@ def test_duplicate_abbreviation_raises_normalization_error() -> None:
     )
     with pytest.raises(NormalizationError, match="NOR"):
         normalize(extracted)
+
+
+def test_lap_end_time_is_carried_through_normalization() -> None:
+    result = normalize(_base_session(drivers=[_driver()], laps=[_lap()]))
+    assert result.laps[0].lap_end_time_ms == 67_000

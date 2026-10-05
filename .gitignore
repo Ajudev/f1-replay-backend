@@ -16,3 +16,4 @@ htmlcov/
 .vscode/
 AGENTS.md
 .fastf1-cache/
+.claude

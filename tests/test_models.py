@@ -262,6 +262,7 @@ async def test_replay_session_requires_existing_session(db_session: AsyncSession
 
 def test_event_type_enum_contains_exact_required_members() -> None:
     expected = {
+        "RACE_STARTED",
         "LAP_COMPLETED",
         "SECTOR_COMPLETED",
         "POSITION_CHANGED",

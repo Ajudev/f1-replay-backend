@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from app.models.race import Race
     from app.models.race_event import RaceEvent
     from app.models.replay_session import ReplaySession
+    from app.models.session_timeline import SessionTimeline
     from app.models.track_status_period import TrackStatusPeriod
     from app.models.tyre_stint import TyreStint
 
@@ -70,6 +71,11 @@ class RaceSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     track_status_periods: Mapped[list["TrackStatusPeriod"]] = relationship(
         back_populates="session",
         cascade="all, delete-orphan",
+    )
+    timeline: Mapped["SessionTimeline | None"] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        uselist=False,
     )
     replay_sessions: Mapped[list["ReplaySession"]] = relationship(
         back_populates="session",

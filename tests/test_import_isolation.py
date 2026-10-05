@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 FORBIDDEN = {"fastf1", "pandas"}
-PACKAGES = ("api", "services", "models", "domain")
+PACKAGES = ("api", "services", "models", "domain", "timeline")
 
 
 def _iter_python_files(root: Path) -> list[Path]:

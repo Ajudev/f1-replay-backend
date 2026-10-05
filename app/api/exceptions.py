@@ -14,6 +14,13 @@ from app.ingestion.errors import (
 )
 from app.services.race_queries import RaceNotFoundError
 from app.services.race_queries import SessionNotFoundError as QuerySessionNotFoundError
+from app.timeline.errors import (
+    TimelineBuildError,
+    TimelineConflictError,
+    TimelineNotGeneratedError,
+    TimelineValidationError,
+    UnsupportedSessionTypeError,
+)
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -67,3 +74,40 @@ def register_exception_handlers(app: FastAPI) -> None:
         exc: PersistenceError,
     ) -> JSONResponse:
         return JSONResponse(status_code=500, content={"detail": exc.message})
+
+    @app.exception_handler(TimelineNotGeneratedError)
+    async def timeline_not_generated_handler(
+        _request: Request,
+        exc: TimelineNotGeneratedError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": exc.message})
+
+    @app.exception_handler(TimelineConflictError)
+    async def timeline_conflict_handler(
+        _request: Request,
+        exc: TimelineConflictError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": exc.message})
+
+    @app.exception_handler(UnsupportedSessionTypeError)
+    async def unsupported_session_type_handler(
+        _request: Request,
+        exc: UnsupportedSessionTypeError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": exc.message})
+
+    @app.exception_handler(TimelineBuildError)
+    async def timeline_build_error_handler(
+        _request: Request,
+        exc: TimelineBuildError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"detail": exc.message})
+
+    @app.exception_handler(TimelineValidationError)
+    async def timeline_validation_error_handler(
+        _request: Request,
+        exc: TimelineValidationError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422, content={"detail": exc.message, "problems": exc.problems}
+        )
