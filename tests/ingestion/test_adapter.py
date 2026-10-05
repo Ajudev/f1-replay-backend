@@ -136,12 +136,15 @@ def test_extract_laps_reads_lap_end_time_from_time_column() -> None:
             return 1
 
         def iterrows(self):  # noqa: ANN201
-            yield 0, {
-                "Driver": "NOR",
-                "LapNumber": 1,
-                "LapStartTime": timedelta(seconds=3600),
-                "Time": timedelta(seconds=3690, milliseconds=250),
-            }
+            yield (
+                0,
+                {
+                    "Driver": "NOR",
+                    "LapNumber": 1,
+                    "LapStartTime": timedelta(seconds=3600),
+                    "Time": timedelta(seconds=3690, milliseconds=250),
+                },
+            )
 
     loader = FastF1SessionLoader(cache_dir="/tmp/unused-fastf1-test-cache")
     laps = loader._extract_laps(_Laps())

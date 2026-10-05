@@ -17,11 +17,14 @@ class ReplayEvent:
     """A historical timeline event released by a replay.
 
     Carries the timeline's own ``sequence`` so consumers can detect gaps or
-    duplicates. ``payload`` is shared with the replay's loaded timeline and must
+    duplicates. ``run_id`` identifies one start or restart of the replay: a restart
+    re-emits the timeline from sequence 0, so consumers need ``(run_id, sequence)``
+    to tell runs apart. ``payload`` is shared with the replay's loaded timeline and must
     be treated as read-only.
     """
 
     replay_id: UUID
+    run_id: UUID
     session_id: UUID
     sequence: int
     event_type: EventType

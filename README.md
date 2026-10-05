@@ -3,7 +3,8 @@
 Backend for the F1 Historical Race Replay and Event Detection Engine. It imports
 historical Formula 1 sessions via FastF1, stores normalized domain data in
 PostgreSQL, builds a deterministic event timeline, and replays it on a
-controllable virtual race clock. Event detection, streaming (Redis Streams) and
+controllable virtual race clock, and publishes the replayed events to Redis
+Streams for independent consumers. Race-state processing, event detection and
 WebSockets are not implemented yet.
 
 ## Requirements
@@ -312,11 +313,14 @@ the database is a plain 503.
 
 ### Event emission
 
-The engine publishes each event as a `ReplayEvent` (replay id, session id,
+The engine publishes each event as a `ReplayEvent` (replay id, run id, session id,
 `sequence`, type, race time, lap, driver, payload) to a `ReplayEventSink`
 (`app/replay/events.py`), awaiting each publish in order. The engine does not know
-what backs the sink; the default only logs at DEBUG level. A streaming backend can
-implement the same interface.
+what backs the sink. The API process wires a `RedisStreamPublisher` (see
+[Event streaming](#event-streaming)); `LoggingEventSink` (DEBUG logging only) remains
+available. A sink exception fails the replay and the event is not counted as
+emitted. `run_id` is generated per start or restart, so consumers can tell a
+restarted replay (which re-emits from sequence 0) from the original run.
 
 ### Endpoints
 
@@ -348,6 +352,124 @@ applies and is reported by later reads).
 - If a worker is cancelled after the stop timeout, the event being published at
   that moment may or may not have reached the sink.
 
+## Event streaming
+
+```
+Replay engine -> RedisStreamPublisher -> Redis Streams -> independent consumer groups
+```
+
+Producers and consumers are decoupled: the publisher only appends to a stream and
+never waits for consumers. Each consumer group receives every message and keeps its
+own progress, so a slow or failing group affects nobody else. Consumers are **not**
+started inside the API process; they run as separate processes (for example
+`python -m app.streaming.cli consume`).
+
+### Streams
+
+| Stream | Default name | Purpose |
+|--------|--------------|---------|
+| raw | `race.raw.events` | Historical timeline events released by replays (used now) |
+| state | `race.state.events` | Reserved for derived race-state events |
+| detected | `race.detected.events` | Reserved for detected analytical events |
+| dead letter | `race.dead_letter.events` | Messages that could not be processed |
+
+All replays share the one raw stream; events are separated by `replay_id` and
+`run_id`. Per-replay streams would need dynamic group creation and cleanup and force
+consumers to discover streams. Names and tuning come from settings (below).
+
+Consumer group names live in `app/streaming/config.py`: `race-state-processors`,
+`event-detectors`, `event-persisters`, `websocket-gateway` and the validation group
+`raw-event-auditors`. Consumer names are unique per process
+(`{prefix}-{hostname}-{pid}-{short uuid}`).
+
+### Envelope
+
+Each entry has small flat headers (`event_id`, `schema_version`, `event_type`,
+`replay_id`, `run_id`, `sequence`) for inspection with `XRANGE`, plus `data`: the full
+envelope as compact, key-sorted JSON (`event_id`, `schema_version`, `event_type`,
+`replay_id`, `run_id`, `session_id`, `sequence`, `race_time_ms`, `lap_number`,
+`driver_id`, `driver_abbreviation`, `published_at`, `payload`). `data` is the source
+of truth. UUIDs are strings, datetimes ISO-8601 UTC, decimals strings; any other
+payload type is rejected with a serialization error (no pickle).
+
+### Versioning
+
+`STREAM_EVENT_SCHEMA_VERSION` is currently `1`. Consumers declare the versions they
+support (default `{1}`). Adding optional fields is non-breaking and needs no bump;
+removing, renaming or retyping a field, or changing its meaning, requires a bump. A
+message with an unsupported version is dead-lettered without retries.
+
+### Identifiers
+
+- `event_id`: deterministic `uuid5(run_id, str(sequence))`. A retried publish of the
+  same logical event has the same id, so consumers can deduplicate.
+- `sequence`: position in the replay timeline (contiguous from 0 within a run).
+- `run_id`: one start or restart of a replay.
+- Redis message id (for example `1700000000000-0`): assigned by Redis on XADD, not
+  part of the envelope; consumers see it as `ReceivedMessage.message_id`.
+
+### Publisher behaviour
+
+`RedisStreamPublisher` uses the app's shared Redis connection pool. Connection and
+timeout errors are retried a bounded number of times with a short backoff; then a
+`StreamPublishError` is raised, which fails the replay (`FAILED`, `status_reason` set,
+the event is not counted and not skipped). Other Redis errors fail immediately. App
+startup does not require Redis. Delivery is at-least-once: if an XADD succeeds but
+its reply is lost, the retry can append the same event twice with the same `event_id`.
+
+### Consumers
+
+`StreamConsumer` (`app/streaming/consumer.py`) provides:
+
+- group creation with `XGROUP CREATE ... MKSTREAM` (idempotent). The default start id
+  is `$` (only messages published after the group exists); create groups before
+  replays start or set `group_start_id` to `0` to read the retained backlog.
+- blocking `XREADGROUP` reads (no busy polling) and processing of the consumer's own
+  pending list on startup.
+- acknowledgement only after the handler succeeds. A failing handler leaves the
+  message pending; later messages are not blocked.
+- retry: messages idle longer than `STREAM_RECLAIM_IDLE_MS` are claimed with
+  `XAUTOCLAIM` (by any consumer in the group) and handled again.
+- dead letter: malformed messages, unsupported versions and messages delivered more
+  than `STREAM_MAX_DELIVERIES` times are written to the dead-letter stream (original
+  data, stream, message id, group, consumer, reason, delivery count, time) and
+  acknowledged in one MULTI/EXEC transaction. For the delivery limit the handler ran
+  `STREAM_MAX_DELIVERIES` times and the recorded `delivery_count` is one higher (the
+  delivery that triggered dead-lettering).
+- idempotency: an `IdempotencyStore` (`RedisIdempotencyStore`, key
+  `stream:processed:{group}:{event_id}` with TTL) skips events already handled.
+
+This is at-least-once delivery with idempotent consumers, not exactly-once: a crash
+after a handler finished but before the event is marked processed causes a
+redelivery, so handlers must be idempotent. `app/streaming/audit.py` is a minimal
+validation handler (logs event id, replay id, run id and sequence only).
+
+### Retention and backpressure
+
+The raw stream is trimmed approximately (`XADD MAXLEN ~ STREAM_MAXLEN`, `0` disables
+trimming). Trimming can drop messages a lagging group has not consumed yet, so size
+the limit for the largest expected backlog. The publisher never slows down for
+consumers; watch consumer lag and pending counts instead (CLI below). Running
+consumers log their backlog periodically, not per event.
+
+### Debugging
+
+```bash
+uv run python -m app.streaming.cli info                      # length, ids, groups, lag
+uv run python -m app.streaming.cli tail --count 5            # decoded latest events
+uv run python -m app.streaming.cli pending --group raw-event-auditors
+uv run python -m app.streaming.cli dead-letters
+uv run python -m app.streaming.cli consume                   # validation consumer
+
+redis-cli XINFO STREAM race.raw.events
+redis-cli XINFO GROUPS race.raw.events
+redis-cli XPENDING race.raw.events raw-event-auditors
+redis-cli XRANGE race.raw.events - + COUNT 5
+redis-cli XRANGE race.dead_letter.events - + COUNT 5
+```
+
+No HTTP endpoint exposes Redis.
+
 ## Read endpoints
 
 - `GET /races`
@@ -363,6 +485,16 @@ Default suite (no FastF1 downloads):
 
 ```bash
 uv run pytest
+```
+
+Streaming tests use fakeredis. To also run them against a real Redis, point
+`REDIS_TEST_URL` at a disposable instance (never the application's Redis; use a
+separate database number). Tests use uniquely named streams and delete them
+afterwards; they also delete every `stream:processed:*` idempotency key in that
+database, so it must hold nothing else you care about.
+
+```bash
+REDIS_TEST_URL=redis://localhost:6379/15 uv run pytest tests/streaming
 ```
 
 Optional live FastF1 smoke test:
@@ -383,5 +515,17 @@ FASTF1_RUN_EXTERNAL=1 uv run pytest -m external
 | `API_HOST` | no | Bind host |
 | `API_PORT` | no | Bind port |
 | `FASTF1_CACHE_DIR` | no | FastF1 cache directory (default `.fastf1-cache`) |
+| `STREAM_RAW_EVENTS` | no | Raw events stream name (default `race.raw.events`) |
+| `STREAM_STATE_EVENTS` | no | Reserved state events stream (default `race.state.events`) |
+| `STREAM_DETECTED_EVENTS` | no | Reserved detected events stream (default `race.detected.events`) |
+| `STREAM_DEAD_LETTER` | no | Dead-letter stream (default `race.dead_letter.events`) |
+| `STREAM_MAXLEN` | no | Approximate raw stream retention, `0` = unbounded (default `100000`) |
+| `STREAM_DEAD_LETTER_MAXLEN` | no | Approximate dead-letter retention (default `10000`) |
+| `STREAM_READ_COUNT` | no | Messages per consumer read (default `100`) |
+| `STREAM_BLOCK_MS` | no | Consumer blocking read timeout in ms (default `5000`) |
+| `STREAM_MAX_DELIVERIES` | no | Deliveries before dead-lettering (default `5`) |
+| `STREAM_RECLAIM_IDLE_MS` | no | Idle time before a pending message is reclaimed (default `30000`) |
+| `STREAM_PUBLISH_ATTEMPTS` | no | Publish attempts on connection errors (default `3`) |
+| `STREAM_IDEMPOTENCY_TTL_SECONDS` | no | Processed-event marker TTL (default `86400`) |
 
 Copy `.env.example` for local values. Do not commit `.env`.

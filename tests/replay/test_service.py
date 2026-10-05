@@ -233,6 +233,23 @@ async def test_restart_while_running_and_after_completion(replay_env: ReplayEnv)
     assert again.state.status is ReplayStatus.RUNNING
 
 
+async def test_run_id_is_stable_within_a_run_and_new_after_restart(
+    replay_env: ReplayEnv,
+) -> None:
+    svc, sink, timer = replay_env.service, replay_env.sink, replay_env.timer
+    replay_id = (await svc.create(replay_env.race.session_id)).state.replay_id
+    await svc.start(replay_id)
+    await timer.advance(100)
+    first = {e.run_id for e in sink.events}
+    assert len(first) == 1
+    emitted = len(sink.events)
+
+    await svc.restart(replay_id)
+    await timer.advance(100)
+    second = {e.run_id for e in sink.events[emitted:]}
+    assert len(second) == 1 and second != first
+
+
 async def test_speed_change_preserves_position_and_persists(
     replay_env: ReplayEnv, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:

@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.domain.enums import EventType, ReplayStatus
 from app.replay.clock import ReplayTimer, VirtualRaceClock
@@ -99,6 +99,7 @@ class ReplayRunner:
         self._stop_requested = False
         self._loop_exited = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
+        self._run_id = uuid4()  # one per runner, i.e. per start/restart
         self._index = 0
         self._leader_laps = 0
         self._state = replace(
@@ -116,6 +117,10 @@ class ReplayRunner:
     @property
     def replay_id(self) -> UUID:
         return self._state.replay_id
+
+    @property
+    def run_id(self) -> UUID:
+        return self._run_id
 
     @property
     def status(self) -> ReplayStatus:
@@ -254,6 +259,7 @@ class ReplayRunner:
         await self._sink.publish(
             ReplayEvent(
                 replay_id=self._state.replay_id,
+                run_id=self._run_id,
                 session_id=self._state.session_id,
                 sequence=entry.sequence,
                 event_type=entry.event_type,

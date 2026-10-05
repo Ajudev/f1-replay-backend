@@ -19,8 +19,9 @@ from app.db.session import create_engine, create_session_factory
 from app.infrastructure.redis import RedisClient
 from app.replay.clock import AsyncioReplayTimer
 from app.replay.errors import ReplayPersistenceError
-from app.replay.events import LoggingEventSink
 from app.replay.service import ReplayService
+from app.streaming.config import StreamConfig
+from app.streaming.publisher import RedisStreamPublisher
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine = create_engine(settings.database_url)
     session_factory = create_session_factory(engine)
     redis = RedisClient(settings.redis_url)
+    # Replay events go to Redis Streams over the app's shared connection pool. The
+    # client connects lazily, so startup succeeds with Redis down; a publish failure
+    # fails the replay explicitly. Consumers run as separate processes (CLI).
     replay_service = ReplayService(
-        session_factory, sink=LoggingEventSink(), timer=AsyncioReplayTimer()
+        session_factory,
+        sink=RedisStreamPublisher(redis, StreamConfig.from_settings(settings)),
+        timer=AsyncioReplayTimer(),
     )
 
     app.state.settings = settings

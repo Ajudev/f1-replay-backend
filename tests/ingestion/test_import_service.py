@@ -161,7 +161,9 @@ async def test_persist_full_graph_with_foreign_keys(db_session: AsyncSession) ->
 
     sectors = (
         await db_session.scalars(
-            select(Sector).join(Lap, Sector.lap_id == Lap.id).where(Lap.session_id == result.session_id)
+            select(Sector)
+            .join(Lap, Sector.lap_id == Lap.id)
+            .where(Lap.session_id == result.session_id)
         )
     ).all()
     assert len(sectors) == 5

@@ -64,15 +64,11 @@ def normalize(extracted: ExtractedSession) -> NormalizedSession:
         abbr = (driver.abbreviation or "").strip().upper()
         if len(abbr) != 3:
             skipped_count += 1
-            warnings.append(
-                f"Skipped driver with invalid abbreviation: {driver.abbreviation!r}"
-            )
+            warnings.append(f"Skipped driver with invalid abbreviation: {driver.abbreviation!r}")
             continue
 
         if abbr in valid_abbreviations:
-            raise NormalizationError(
-                f"Duplicate driver abbreviation in session data: {abbr}"
-            )
+            raise NormalizationError(f"Duplicate driver abbreviation in session data: {abbr}")
 
         full_name = _resolve_full_name(driver.full_name, driver.first_name, driver.last_name, abbr)
         drivers.append(
@@ -139,7 +135,9 @@ def normalize(extracted: ExtractedSession) -> NormalizedSession:
             lap_time_ms=lap.lap_time_ms,
             position=_positive_or_none(lap.position),
             compound=compound,
-            tyre_age_laps=lap.tyre_age_laps if lap.tyre_age_laps is not None and lap.tyre_age_laps >= 0 else None,
+            tyre_age_laps=lap.tyre_age_laps
+            if lap.tyre_age_laps is not None and lap.tyre_age_laps >= 0
+            else None,
             stint_number=stint_number,
             is_deleted=lap.is_deleted,
             is_accurate=lap.is_accurate,
@@ -163,9 +161,7 @@ def normalize(extracted: ExtractedSession) -> NormalizedSession:
         # Only warn when the driver has laps but none with stint numbers
         has_any_stint = any(a == abbr for a, _ in stint_laps)
         if not has_any_stint:
-            warnings.append(
-                f"Driver {abbr} has laps but no stint numbers; stints not invented"
-            )
+            warnings.append(f"Driver {abbr} has laps but no stint numbers; stints not invented")
 
     stints: list[NormalizedStint] = []
     for (abbr, stint_number), group in sorted(stint_laps.items(), key=lambda x: (x[0][0], x[0][1])):
@@ -173,9 +169,7 @@ def normalize(extracted: ExtractedSession) -> NormalizedSession:
         compound = next((item.compound for item in group_sorted if item.compound), None)
         if compound is None:
             skipped_count += 1
-            warnings.append(
-                f"Skipped stint {stint_number} for {abbr}: no compound on any lap"
-            )
+            warnings.append(f"Skipped stint {stint_number} for {abbr}: no compound on any lap")
             continue
         earliest = group_sorted[0]
         stints.append(

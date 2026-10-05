@@ -29,6 +29,17 @@ class RedisClient:
         instance._closed = False
         return instance
 
+    @property
+    def client(self) -> Redis:
+        """The underlying ``redis.asyncio.Redis`` (shares one connection pool).
+
+        Streaming code uses this so publishing and consuming reuse the app's pool
+        instead of opening a connection per event. Raises once the wrapper is closed.
+        """
+        if self._client is None or self._closed:
+            raise RuntimeError("Redis client is closed")
+        return self._client
+
     async def ping(self) -> bool:
         """Return True if Redis responds to PING."""
         if self._client is None or self._closed:

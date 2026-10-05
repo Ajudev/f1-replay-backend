@@ -526,7 +526,9 @@ def test_track_status_processed_chronologically_not_by_sequence() -> None:
     )
     events = build_timeline(src).events
     changes = of_type(events, EventType.TRACK_STATUS_CHANGED)
-    assert [(e.race_time_ms, e.payload["status"], e.payload["previous_status"]) for e in changes] == [
+    assert [
+        (e.race_time_ms, e.payload["status"], e.payload["previous_status"]) for e in changes
+    ] == [
         (40_000, "SAFETY_CAR", None),
         (50_000, "YELLOW", "SAFETY_CAR"),
         (95_000, "GREEN", "YELLOW"),

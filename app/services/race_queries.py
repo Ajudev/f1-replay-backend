@@ -74,9 +74,7 @@ class RaceQueryService:
 
     async def get_race(self, race_id: UUID) -> RaceDetail:
         race = await self._session.scalar(
-            select(Race)
-            .where(Race.id == race_id)
-            .options(selectinload(Race.sessions))
+            select(Race).where(Race.id == race_id).options(selectinload(Race.sessions))
         )
         if race is None:
             raise RaceNotFoundError(race_id)
@@ -121,9 +119,7 @@ class RaceQueryService:
             .where(Lap.session_id == session_id)
         )
         stint_count = await self._session.scalar(
-            select(func.count())
-            .select_from(TyreStint)
-            .where(TyreStint.session_id == session_id)
+            select(func.count()).select_from(TyreStint).where(TyreStint.session_id == session_id)
         )
         track_count = await self._session.scalar(
             select(func.count())
@@ -192,9 +188,7 @@ class RaceQueryService:
             .where(*filters)
         )
 
-        rows = (
-            await self._session.scalars(base.limit(limit).offset(offset))
-        ).all()
+        rows = (await self._session.scalars(base.limit(limit).offset(offset))).all()
 
         items = [
             LapOut(

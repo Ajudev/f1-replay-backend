@@ -65,6 +65,4 @@ class TrackStatusPeriod(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     session: Mapped["RaceSession"] = relationship(back_populates="track_status_periods")
 
     def __repr__(self) -> str:
-        return (
-            f"<TrackStatusPeriod id={self.id!s} status={self.status} seq={self.sequence}>"
-        )
+        return f"<TrackStatusPeriod id={self.id!s} status={self.status} seq={self.sequence}>"
