@@ -3,6 +3,7 @@
 Import every model here so Alembic and metadata discovery see them.
 """
 
+from app.models.detected_event import DetectedEvent
 from app.models.driver import Driver
 from app.models.lap import Lap
 from app.models.race import Race
@@ -16,6 +17,7 @@ from app.models.track_status_period import TrackStatusPeriod
 from app.models.tyre_stint import TyreStint
 
 __all__ = [
+    "DetectedEvent",
     "Driver",
     "Lap",
     "Race",

@@ -55,6 +55,55 @@ class Settings(BaseSettings):
     race_state_gap_wait_ms: int = Field(default=1_500, ge=0, alias="RACE_STATE_GAP_WAIT_MS")
     race_state_key_prefix: str = Field(default="race", min_length=1, alias="RACE_STATE_KEY_PREFIX")
 
+    # Event Detection Engine (see app/detection/config.py).
+    detection_key_prefix: str = Field(default="race", min_length=1, alias="DETECTION_KEY_PREFIX")
+    detection_context_ttl_seconds: int = Field(
+        default=604_800, ge=1, alias="DETECTION_CONTEXT_TTL_SECONDS"
+    )
+    detection_disabled_detectors: str = Field(default="", alias="DETECTION_DISABLED_DETECTORS")
+    detection_exclude_yellow: bool = Field(default=True, alias="DETECTION_EXCLUDE_YELLOW")
+    detection_battle_gap_ms: int = Field(default=1_000, ge=1, alias="DETECTION_BATTLE_GAP_MS")
+    detection_battle_release_gap_ms: int = Field(
+        default=1_500, ge=1, alias="DETECTION_BATTLE_RELEASE_GAP_MS"
+    )
+    detection_battle_window_laps: int = Field(default=4, ge=2, alias="DETECTION_BATTLE_WINDOW_LAPS")
+    detection_battle_min_closing_rate_ms: int = Field(
+        default=200, ge=1, alias="DETECTION_BATTLE_MIN_CLOSING_RATE_MS"
+    )
+    detection_battle_cooldown_laps: int = Field(
+        default=3, ge=0, alias="DETECTION_BATTLE_COOLDOWN_LAPS"
+    )
+    detection_rapid_closing_max_gap_ms: int = Field(
+        default=5_000, ge=1, alias="DETECTION_RAPID_CLOSING_MAX_GAP_MS"
+    )
+    detection_rapid_closing_min_rate_ms: int = Field(
+        default=500, ge=1, alias="DETECTION_RAPID_CLOSING_MIN_RATE_MS"
+    )
+    detection_pb_min_improvement_ms: int = Field(
+        default=300, ge=0, alias="DETECTION_PB_MIN_IMPROVEMENT_MS"
+    )
+    detection_degradation_baseline_laps: int = Field(
+        default=5, ge=2, alias="DETECTION_DEGRADATION_BASELINE_LAPS"
+    )
+    detection_degradation_recent_laps: int = Field(
+        default=5, ge=2, alias="DETECTION_DEGRADATION_RECENT_LAPS"
+    )
+    detection_degradation_threshold_ms: int = Field(
+        default=500, ge=1, alias="DETECTION_DEGRADATION_THRESHOLD_MS"
+    )
+    detection_degradation_reemit_step_ms: int = Field(
+        default=500, ge=1, alias="DETECTION_DEGRADATION_REEMIT_STEP_MS"
+    )
+    detection_anomaly_baseline_laps: int = Field(
+        default=5, ge=3, alias="DETECTION_ANOMALY_BASELINE_LAPS"
+    )
+    detection_anomaly_min_score: float = Field(
+        default=4.0, gt=0, alias="DETECTION_ANOMALY_MIN_SCORE"
+    )
+    detection_anomaly_min_deviation_ms: int = Field(
+        default=2_000, ge=1, alias="DETECTION_ANOMALY_MIN_DEVIATION_MS"
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

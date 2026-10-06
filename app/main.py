@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.api.detection import router as detection_router
 from app.api.exceptions import register_exception_handlers
 from app.api.health import router as health_router
 from app.api.race_state import router as race_state_router
@@ -110,6 +111,7 @@ def create_app() -> FastAPI:
     application.include_router(timeline_router)
     application.include_router(replays_router)
     application.include_router(race_state_router)
+    application.include_router(detection_router)
     return application
 
 

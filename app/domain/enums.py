@@ -22,6 +22,29 @@ class EventType(StrEnum):
     PACE_ANOMALY = "PACE_ANOMALY"
 
 
+class DetectedEventType(StrEnum):
+    """Analytical events produced by the event detection engine.
+
+    Distinct from ``EventType`` (raw historical timeline events).
+    """
+
+    BATTLE_FORMING = "BATTLE_FORMING"
+    RAPIDLY_CLOSING = "RAPIDLY_CLOSING"
+    OVERTAKE = "OVERTAKE"
+    PACE_DEGRADATION = "PACE_DEGRADATION"
+    PACE_ANOMALY = "PACE_ANOMALY"
+    PERSONAL_BEST = "PERSONAL_BEST"
+    NEW_STINT = "NEW_STINT"
+
+
+class Severity(StrEnum):
+    """Coarse magnitude of a detection, only where a detector documents its bands."""
+
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
 class SessionType(StrEnum):
     """Grand Prix weekend session types."""
 

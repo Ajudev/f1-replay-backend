@@ -378,7 +378,7 @@ All replays share the one raw stream; events are separated by `replay_id` and
 consumers to discover streams. Names and tuning come from settings (below).
 
 Consumer group names live in `app/streaming/config.py`: `race-state-processors`,
-`event-detectors`, `event-persisters`, `websocket-gateway` and the validation group
+`race-event-detectors`, `event-persisters`, `websocket-gateway` and the validation group
 `raw-event-auditors`. Consumer names are unique per process
 (`{prefix}-{hostname}-{pid}-{short uuid}`).
 
@@ -652,6 +652,159 @@ partitioning, not implemented).
   happens when the session data needed for seeding is gone.
 - Seeking is not supported.
 
+## Event detection
+
+The detection engine turns the stream of race state events into structured, evidence-backed
+detections (battles, overtakes, pace changes, personal bests, new stints). It is deterministic
+and statistical (no ML), explainable (every detection carries the numbers behind it), and it
+never changes race state, controls replays or touches FastF1.
+
+```
+race.state.events -> StreamConsumer (group race-event-detectors) -> DetectionProcessor
+                       |-> engine -> registered detectors (pure)
+                       |-> Redis  race:{replay_id}:detection   (context: mirror + detector memory)
+                       |-> race.detected.events                (detected events)
+                       `-> PostgreSQL detected_events          (durable record, API)
+```
+
+```bash
+uv run python -m app.detection.worker     # needs the race state worker to be running too
+```
+
+### Why it reads state events
+
+The race state processor runs concurrently with the detectors. Reading "the current state"
+while handling a raw event would usually return a state that is already ahead of that event, so
+results would depend on timing. A state event pairs the source raw event (`source_event_id`,
+`source_event_type`, sequence, driver, race time) with the state exactly after it, so the same
+stream always yields the same detections. State events are only published for non-empty
+deltas, so sequence holes are normal.
+
+### Detection context and idempotency
+
+Per replay one JSON document is kept in Redis (`race:{replay_id}:detection`, TTL
+`DETECTION_CONTEXT_TTL_SECONDS`): the run, `last_sequence`, a mirror of the public race state
+(deltas merged, snapshots replace it), a bounded track status change history and one memory per
+detector (namespaced by detector name and version).
+
+| Situation | Behavior |
+|-----------|----------|
+| same run, `seq <= last_sequence` | duplicate: nothing detected or published, history not double counted |
+| same run, higher sequence | mirror advanced, detectors run |
+| other run or no context, snapshot event | context reset from the full state, fresh detector memory |
+| other run or no context, `STATE_UPDATED` | mirror bootstrapped from the race state store (same run, not behind the event), detector memory starts empty (windows refill); otherwise skipped with a warning |
+| other run, published before the current run began | stale straggler, ignored |
+| `STATE_REBUILT` | detectors get `rebuilt=true`; the overtake detector does not confirm swaps from it |
+
+Order per event: detect, persist to PostgreSQL (insert-ignore on the deterministic primary key),
+then commit context and `XADD` of the detected events in one `WATCH`/`MULTI`/`EXEC`
+transaction (conflicts are retried a bounded number of times). A retry after a Redis failure
+therefore never duplicates rows, and the consumer ACKs only after all of this succeeded.
+One failing detector is logged and skipped; it does not block the others.
+
+### Detected event contract (`schema_version` 1)
+
+Published on `race.detected.events` in the usual stream envelope (`event_type` = detected type,
+`sequence` = source sequence, `payload` = the document below) and stored in `detected_events`.
+
+| Field | Meaning |
+|-------|---------|
+| `detected_event_id` | deterministic `uuid5(run_id, detector, type, source sequence, drivers, logical key)` |
+| `event_type` | `BATTLE_FORMING`, `RAPIDLY_CLOSING`, `OVERTAKE`, `PACE_DEGRADATION`, `PACE_ANOMALY`, `PERSONAL_BEST`, `NEW_STINT` |
+| `replay_id`, `run_id`, `session_id`, `race_id` | identity |
+| `race_time_ms`, `lap_number` | when (race time of the source event; lap of the subject driver) |
+| `primary_driver_*`, `secondary_driver_*` | id and abbreviation (secondary: defender / overtaken driver) |
+| `severity` | `LOW`/`MEDIUM`/`HIGH` only where documented bands exist (degradation, anomaly), else `null` |
+| `confidence` | `null`: no detector derives one objectively |
+| `evidence` | machine-readable facts, numbers in milliseconds |
+| `source_event_ids`, `source_sequence` | the raw event the detection was confirmed by |
+| `detector_name`, `detector_version`, `detected_at` | provenance (`detected_at` is wall clock and excluded from determinism comparisons) |
+
+### Detectors and rules
+
+Shared pace rules: a lap is *clean* when it has a time, is not deleted, not lap 1, not an in or
+out lap, its whole time window (checked against the status change history, not just the status at
+lap end) saw no safety car, VSC, red flag or (configurable) yellow, it is not the restart lap
+after such a period, and its track status is known. Detectors keep their own bounded per-driver
+history keyed by stint; a new stint empties it.
+
+| Type | Rule |
+|------|------|
+| `BATTLE_FORMING` | On the attacker's lap, defender = car one position ahead, gap = `interval_to_ahead_ms` (`LAP_END`). A full window (`DETECTION_BATTLE_WINDOW_LAPS`, default 4) of consecutive-lap gaps for the same pair, current gap <= battle gap, closing >= min rate per lap, at most one non-closing step, no pit in/out laps or pit lane, green track. Evidence: `gap_ms`, `gap_history`, `closing_rate_ms_per_lap`, `observed_laps`, `window_laps`, positions, `threshold_ms`, `basis`. |
+| `RAPIDLY_CLOSING` | Same trend further away: gap above the battle gap and up to `DETECTION_RAPID_CLOSING_MAX_GAP_MS`, closing >= `DETECTION_RAPID_CLOSING_MIN_RATE_MS` per lap. Once per approach, never while the pair is already in a battle. Same evidence plus `max_gap_ms`, `min_closing_rate_ms`. |
+| `OVERTAKE` | Adjacent swap confirmed when the later of the two drivers completes lap N (lap-end positions); both running, pit in/out flags on laps N and N-1 known and false (missing pit data is never read as on track), not in the pit lane, lap N green. Otherwise (pit cycles, unknown pit data, safety car, retirements, multi-position or ambiguous changes, lap 1, rebuilt state) nothing is emitted. Evidence: previous/new positions of both, `lap`, `classification` (`ON_TRACK_LIKELY`), `basis` (`LAP_END`), `confirmed_by`. |
+| `PACE_DEGRADATION` | Same stint: `median(recent M clean laps) - median(baseline N clean laps before them) >= threshold` and at least M-1 recent laps slower than the baseline median. Once per stint, again only if the delta grew by a step. Severity by delta (1.0 s MEDIUM, 2.0 s HIGH). Evidence: medians, `delta_ms`, `slower_recent_laps`, windows, lap lists, `compound`, `tyre_age_laps`, `stint_number`. It states the slowdown, not its cause. |
+| `PACE_ANOMALY` | Clean lap, full baseline of K clean laps in the stint: score `(actual - expected) / (1.4826 * max(MAD, floor))` >= min score and deviation >= min ms (slow side only). Anomalous laps stay out of the baseline; a run of K anomalous laps becomes the new baseline; a run is reported once. Severity by deviation (4 s MEDIUM, 10 s HIGH). Evidence: `lap_time_ms`, `expected_ms`, `deviation_ms`, `robust_score`, `mad_ms`, `mad_floor_ms`, `baseline_laps`, tyre fields. Sector anomalies are not implemented: the race state has no sector data. |
+| `PERSONAL_BEST` | Eligible lap (time, not deleted, not lap 1, no pit lap, not neutralised) faster than the driver's best eligible lap; the first only sets the benchmark. An event needs an improvement of at least `DETECTION_PB_MIN_IMPROVEMENT_MS` over the *last reported* best (the true best is always tracked, so many tiny fuel-burn gains add up instead of emitting every lap). Evidence: `lap_time_ms`, `previous_best_ms` (last reported), `previous_true_best_ms`, `previous_best_lap`, `improvement_ms`, `min_improvement_ms`, tyre fields. Distinct from the race-wide fastest lap. |
+| `NEW_STINT` | On `PIT_EXIT`, or a higher stint number seen on `LAP_COMPLETED` when the pit data is missing; once per driver and stint. The starting stint is not "new". Evidence: `stint_number`, `compound` (`null` if unknown), `previous_stint_number`, `previous_compound`, `compound_changed`, `starting_lap`, `tyre_age_laps`, `pit_lane_duration_ms`, `pit_stop_count`, `source_event_type`. |
+
+Strategy detectors (for example `UNDERCUT_ATTEMPT`) are not implemented.
+
+### Suppression
+
+An active battle is not re-reported until the gap exceeds the release gap (hysteresis) or the pair
+is broken (defender change, missing lap, pit lap, neutralisation, unknown gap) **and**
+`DETECTION_BATTLE_COOLDOWN_LAPS` laps have passed. `RAPIDLY_CLOSING` is once per approach and
+also respects the cooldown.
+
+### Configuration
+
+| Variable | Default |
+|----------|---------|
+| `DETECTION_KEY_PREFIX` | `race` |
+| `DETECTION_CONTEXT_TTL_SECONDS` | `604800` |
+| `DETECTION_DISABLED_DETECTORS` | empty (comma separated names: `battle`, `overtake`, `pace_degradation`, `pace_anomaly`, `personal_best`, `stint`) |
+| `DETECTION_EXCLUDE_YELLOW` | `true` |
+| `DETECTION_BATTLE_GAP_MS` / `_RELEASE_GAP_MS` | `1000` / `1500` |
+| `DETECTION_BATTLE_WINDOW_LAPS` | `4` |
+| `DETECTION_BATTLE_MIN_CLOSING_RATE_MS` | `200` per lap |
+| `DETECTION_BATTLE_COOLDOWN_LAPS` | `3` |
+| `DETECTION_RAPID_CLOSING_MAX_GAP_MS` / `_MIN_RATE_MS` | `5000` / `500` per lap |
+| `DETECTION_PB_MIN_IMPROVEMENT_MS` | `300` |
+| `DETECTION_DEGRADATION_BASELINE_LAPS` / `_RECENT_LAPS` | `5` / `5` |
+| `DETECTION_DEGRADATION_THRESHOLD_MS` / `_REEMIT_STEP_MS` | `500` / `500` |
+| `DETECTION_ANOMALY_BASELINE_LAPS` | `5` |
+| `DETECTION_ANOMALY_MIN_SCORE` / `_MIN_DEVIATION_MS` | `4.0` / `2000` |
+
+Invalid combinations (battle release gap below the battle gap, rapid-closing max gap not above
+the battle gap, windows shorter than 2 laps) fail at startup with a `ValueError`.
+
+### Endpoint
+
+```bash
+curl "http://127.0.0.1:8000/replays/$REPLAY_ID/detected-events?event_type=OVERTAKE&driver=NOR&lap_from=10&limit=50"
+```
+
+Filters: `event_type` (repeatable), `driver` (abbreviation or UUID, either side), `lap_from`,
+`lap_to`, `run_id` (default: the run of the most recent detection), `limit` (1-1000, default 100),
+`offset`. Ordered by source sequence, event type, id. 404 unknown replay; 503 database unavailable.
+Table `detected_events` (migration `006`), primary key = the deterministic id.
+
+### Recovery limitations and false positives
+
+- Without a context (Redis loss, TTL, a worker joining mid-run) the mirror is bootstrapped from the
+  race state, but detector memories start empty: battles, pace windows and personal bests refill
+  and may be missed or reported late. A `STATE_REBUILT` skips overtake confirmation.
+- Positions and gaps are lap-end values: an overtake is only known to have happened during a lap.
+  Battles use lap-end gaps, so a pass followed by a re-pass inside one lap is invisible.
+- Pace rules cannot separate tyre wear from fuel, traffic or pace management; lapped traffic is
+  not modelled. Retirements are not visible mid-race, so a retiring car is simply never confirmed.
+- The endpoint's default run is the run of the most recent detection, so right after a restart it
+  may still show the previous run until the new run detects something. Pass `run_id` to be explicit.
+- A detector that raises is logged and skipped for that event; the context still advances, so that
+  detector's detections for the event are lost (and its memory is not updated for it).
+- If the replay was deleted, detections cannot be stored (foreign key); the state event is logged
+  with a warning, ACKed and not published. Other database errors are retried.
+- Run a single detection worker.
+
+### Adding a detector
+
+1. Create `app/detection/detectors/<name>.py` with a `Detector` subclass: `name`, `version`,
+   `triggers` (raw event types), a pydantic `memory_model` and a pure
+   `evaluate(input, memory) -> (drafts, new_memory)` (no I/O, no wall clock).
+2. Add one line to `build_default_registry` in `app/detection/registry.py`.
+3. Add a value to `DetectedEventType` if it emits a new type, and thresholds to `DetectionConfig`.
+
 ## Read endpoints
 
 - `GET /races`
@@ -699,7 +852,7 @@ FASTF1_RUN_EXTERNAL=1 uv run pytest -m external
 | `FASTF1_CACHE_DIR` | no | FastF1 cache directory (default `.fastf1-cache`) |
 | `STREAM_RAW_EVENTS` | no | Raw events stream name (default `race.raw.events`) |
 | `STREAM_STATE_EVENTS` | no | Race state events stream (default `race.state.events`) |
-| `STREAM_DETECTED_EVENTS` | no | Reserved detected events stream (default `race.detected.events`) |
+| `STREAM_DETECTED_EVENTS` | no | Detected events stream (default `race.detected.events`) |
 | `STREAM_DEAD_LETTER` | no | Dead-letter stream (default `race.dead_letter.events`) |
 | `STREAM_MAXLEN` | no | Approximate raw stream retention, `0` = unbounded (default `100000`) |
 | `STREAM_DEAD_LETTER_MAXLEN` | no | Approximate dead-letter retention (default `10000`) |
@@ -714,5 +867,6 @@ FASTF1_RUN_EXTERNAL=1 uv run pytest -m external
 | `RACE_STATE_TTL_SECONDS` | no | TTL of the Redis state document, refreshed on every write (default `604800`) |
 | `RACE_STATE_GAP_WAIT_MS` | no | Max in-process wait for a missing predecessor before rebuilding from the timeline (default `1500`) |
 | `RACE_STATE_KEY_PREFIX` | no | Redis key prefix of the state document (default `race`) |
+| `DETECTION_*` | no | Detection thresholds, see "Event detection > Configuration" |
 
 Copy `.env.example` for local values. Do not commit `.env`.

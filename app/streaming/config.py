@@ -12,7 +12,7 @@ from app.core.config import Settings
 
 # Consumer groups. Each group independently receives every message on its stream.
 GROUP_STATE_PROCESSORS = "race-state-processors"
-GROUP_EVENT_DETECTORS = "event-detectors"
+GROUP_EVENT_DETECTORS = "race-event-detectors"  # reads the state stream
 GROUP_EVENT_PERSISTERS = "event-persisters"
 GROUP_WEBSOCKET_GATEWAY = "websocket-gateway"
 GROUP_RAW_EVENT_AUDITORS = "raw-event-auditors"  # validation consumer
