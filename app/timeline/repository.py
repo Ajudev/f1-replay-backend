@@ -203,8 +203,20 @@ class TimelineRepository:
         await self._session.flush()
         return _stored(row)
 
-    async def load_events(self, session_id: UUID) -> list[StoredEvent]:
-        """Every stored event for the session in ``sequence`` order (one query)."""
+    async def load_events(
+        self,
+        session_id: UUID,
+        *,
+        from_sequence: int | None = None,
+        before_sequence: int | None = None,
+    ) -> list[StoredEvent]:
+        """Stored events in ``sequence`` order (one query): all of them unless
+        ``from_sequence`` (inclusive) / ``before_sequence`` (exclusive) bound it."""
+        filters: list[Any] = [RaceEvent.session_id == session_id]
+        if from_sequence is not None:
+            filters.append(RaceEvent.sequence >= from_sequence)
+        if before_sequence is not None:
+            filters.append(RaceEvent.sequence < before_sequence)
         joined = RaceEvent.__table__.outerjoin(  # type: ignore[attr-defined]
             Driver.__table__,  # type: ignore[attr-defined]
             (RaceEvent.driver_id == Driver.id) & (RaceEvent.session_id == Driver.session_id),
@@ -222,7 +234,7 @@ class TimelineRepository:
                     RaceEvent.payload,
                 )
                 .select_from(joined)
-                .where(RaceEvent.session_id == session_id)
+                .where(*filters)
                 .order_by(RaceEvent.sequence.asc())
             )
         ).all()

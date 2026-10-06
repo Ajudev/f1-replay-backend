@@ -3,9 +3,9 @@
 Backend for the F1 Historical Race Replay and Event Detection Engine. It imports
 historical Formula 1 sessions via FastF1, stores normalized domain data in
 PostgreSQL, builds a deterministic event timeline, and replays it on a
-controllable virtual race clock, and publishes the replayed events to Redis
-Streams for independent consumers. Race-state processing, event detection and
-WebSockets are not implemented yet.
+controllable virtual race clock, publishes the replayed events to Redis
+Streams for independent consumers, and reduces them into a live race state served
+over REST. Event detection and WebSockets are not implemented yet.
 
 ## Requirements
 
@@ -369,7 +369,7 @@ started inside the API process; they run as separate processes (for example
 | Stream | Default name | Purpose |
 |--------|--------------|---------|
 | raw | `race.raw.events` | Historical timeline events released by replays (used now) |
-| state | `race.state.events` | Reserved for derived race-state events |
+| state | `race.state.events` | Incremental race state events published by the race state worker (see [Race state](#race-state)) |
 | detected | `race.detected.events` | Reserved for detected analytical events |
 | dead letter | `race.dead_letter.events` | Messages that could not be processed |
 
@@ -470,6 +470,188 @@ redis-cli XRANGE race.dead_letter.events - + COUNT 5
 
 No HTTP endpoint exposes Redis.
 
+## Race state
+
+The race state engine consumes the raw replay events and deterministically reduces
+them into the current state of the race: positions, laps, tyres, pit status, gaps,
+track status and fastest lap. It does no detection (battles, degradation, pace
+anomalies) and never touches FastF1.
+
+```
+race.raw.events -> StreamConsumer (group race-state-processors) -> RaceStateProcessor
+                     |-> reducer (pure) -> Redis  race:{replay_id}:state  (hot state)
+                     |                  -> race.state.events              (state events)
+                     `-> PostgreSQL race_state_snapshots                  (recovery points)
+```
+
+The processor runs as its own process, never inside the API:
+
+```bash
+uv run python -m app.race_state.worker     # SIGINT / SIGTERM stop it gracefully
+```
+
+### State structure
+
+`GET /replays/{id}/state` returns (additional bookkeeping such as the gap crossing
+window stays internal):
+
+| Field | Meaning |
+|-------|---------|
+| `replay_id`, `run_id`, `session_id`, `race_id`, `season`, `round`, `session_type` | Identity. `run_id` changes on every start or restart. |
+| `source` | `live` (Redis) or `snapshot` (PostgreSQL fallback). `replay_status` is the replay lifecycle status. |
+| `phase` | `PRE_RACE`, `RUNNING`, `CHEQUERED` (the leader finished the final lap), `COMPLETED` (last timeline event applied). |
+| `current_race_time_ms`, `last_sequence`, `last_event_id`, `total_events` | Race time and sequence of the last applied event. |
+| `current_lap`, `total_laps`, `leader_laps_completed`, `leader_driver_id` / `_abbreviation` | See "Current lap" below. |
+| `track_status` | `null` until the first `TRACK_STATUS_CHANGED`, then the normalized status. |
+| `fastest_lap` | Race fastest lap: driver, lap number, lap time, race time. |
+| `drivers` | Ordered by position (unknown positions last, then laps completed, earliest last crossing, abbreviation). |
+
+Driver fields: identity (`driver_id`, `abbreviation`, `driver_number`, `full_name`,
+`team_name`, `grid_position`), `position` / `previous_position`, `laps_completed`,
+`current_lap` (`laps_completed + 1`, capped at `total_laps`; `null` before the start and after
+finishing), `last_lap_time_ms`, `best_lap_time_ms` / `best_lap_number`, `gap_to_leader_ms`,
+`interval_to_ahead_ms`, `gap_basis` (`LAP_END`), `laps_behind_leader`, tyres (`compound`,
+`tyre_age_laps`, `stint_number`, `tyre_info_lap`), pit data (`pit_status` `UNKNOWN` /
+`IN_PIT` / `ON_TRACK`, `pit_stop_count`, last entry/exit race time, last pit lane
+duration), `race_status` (`NOT_STARTED`, `RUNNING`, `FINISHED`, `DID_NOT_FINISH`) and a
+bounded `recent_laps` list (`RACE_STATE_LAP_HISTORY` entries). There are no sector fields:
+`SECTOR_COMPLETED` is never emitted.
+
+The reducer (`app/race_state/reducer.py`) is pure: no I/O, no wall clock, input never
+mutated. The same events always produce the same state, whether they arrive from the
+stream or are replayed from the stored timeline during a rebuild. The initial state is
+seeded once per run from PostgreSQL (drivers with their *grid* positions; finishing
+positions are never used because they would leak the future). Tyre fields stay `null` until
+an event provides them, and tyre age is copied from the data, never incremented.
+
+### Current lap
+
+Same rule as the replay engine: the leader is the driver with the most completed laps, ties
+broken by the earliest crossing of that lap; `current_lap = min(leader_laps_completed + 1,
+total_laps)`, `1` after `RACE_STARTED`, and lapped cars never move it. `total_laps` is the
+highest completed lap in the timeline. Note that the leader is derived from crossings, so it
+can differ from the driver reported in position 1 when the data disagrees.
+
+### Redis hot state and state events
+
+- Key `race:{replay_id}:state` (prefix configurable): one JSON document holding the full
+  state, with a TTL (default 7 days) refreshed on every write. One `GET` and one
+  `WATCH`/`MULTI`/`EXEC` per processed event.
+- In that single transaction the state is written **and** the state event is added to
+  `race.state.events` (approximate `MAXLEN`, the same `STREAM_MAXLEN`). A transition is
+  therefore never stored without being published, nor published twice. If another worker
+  changed the document in between, the transaction aborts (`StateConflictError`) and the message is
+  retried.
+- State events reuse the stream envelope (decodable with `StreamEvent.from_fields`; `event_id`
+  is `uuid5(run_id, "state:<sequence>")`, distinct from the raw event id; `sequence` is the
+  source raw sequence; `race_time_ms` / `lap_number` come from the state). Types:
+  `STATE_INITIALIZED` (full snapshot after `RACE_STARTED`), `STATE_UPDATED` (delta only),
+  `STATE_REBUILT` (full snapshot after a rebuild), `STATE_COMPLETED` (full final snapshot; it
+  replaces the final delta but still lists `kinds` and `changes`).
+- Payload: `source_event_id`, `source_event_type`, `last_sequence`, `rebuilt`, `kinds`
+  (`RACE_STARTED`, `LAP_COMPLETED`, `POSITION_CHANGED`, `PIT_STATUS_CHANGED`,
+  `TRACK_STATUS_CHANGED`, `FASTEST_LAP_CHANGED`, `RACE_COMPLETED`), `changes.race` (changed
+  race-level fields) and `changes.drivers` (full state of each changed driver); snapshot
+  types also carry `state`. Events that change nothing (a `POSITION_CHANGED` already applied
+  by its `LAP_COMPLETED`, sector or unknown events) publish nothing, although the stored
+  sequence still advances.
+
+### Ordering and idempotency
+
+Per replay the state records `run_id`, `last_sequence` and the run's `published_at`:
+
+| Situation | Behavior |
+|-----------|----------|
+| same run, `seq <= last_sequence` | duplicate: nothing changes, nothing published, ACK |
+| same run, `seq == last_sequence + 1` | applied |
+| same run, `seq > last_sequence + 1` | gap: the event waits in process up to `RACE_STATE_GAP_WAIT_MS` (re-reading every 100 ms, `WATCH` released in between) for the predecessor or a concurrent worker; if the gap persists, the missing events are reduced from the stored timeline onto the current state (same run, same `run_published_at`), the event is applied and one `STATE_REBUILT` snapshot is published. The late predecessor is then a duplicate and is ACKed |
+| other run, `published_at` older than the state's run | stale straggler: ignored, ACK |
+| other run or no state, `seq == 0` | new run: seeded from PostgreSQL, previous state replaced |
+| other run or no state, `seq > 0` | rebuild (below) |
+
+Sequence checks are the primary guard; the consumer's idempotency store is a secondary one.
+Unknown event types and `SECTOR_COMPLETED` only advance the sequence (warning / debug log).
+A lost compare-and-set (`StateConflictError`, another worker wrote first) is retried in process
+up to 3 times, since the re-read event is usually a duplicate or the next one. Other processing
+errors (database or Redis failures, an impossible rebuild) are left to the consumer's
+pending/reclaim retry. A failed, dead-lettered or trimmed raw event therefore does not stall
+later events: they wait at most `RACE_STATE_GAP_WAIT_MS`, then rebuild across the hole.
+
+### Rebuild and recovery
+
+When the state is missing (Redis lost data, TTL expired, a worker joined mid-run, a newer run's
+first event was missed), the processor loads the stored timeline events `0 .. seq-1` from
+PostgreSQL, reduces them from the seed, applies the received event and publishes **one**
+full-snapshot `STATE_REBUILT` event. The final state equals that of an uninterrupted run.
+The rebuild fails loudly (`RaceStateRebuildError`, retried) if the stored timeline cannot
+supply those events; regenerating a timeline while a replay of that session is running breaks
+rebuilds of that replay. A stored document with an unreadable body or another
+`schema_version` is treated as missing and rebuilt.
+
+### PostgreSQL snapshots
+
+Table `race_state_snapshots` (migration `005`): replay, run, session, `sequence`,
+`race_time_ms`, `current_lap`, `trigger`, `state_schema_version`, `payload` (JSONB), unique on
+`(replay_id, run_id, sequence)` so a repeated write is a no-op. Triggers are deterministic
+(state fields, not wall clock): `INITIAL` after `RACE_STARTED`, `PERIODIC` when the leader's
+completed laps cross a multiple of `RACE_STATE_SNAPSHOT_EVERY_LAPS`, `FINAL` at completion,
+and `REBUILT` after a rebuild. Never per event. Order: reduce, write snapshot, commit Redis,
+ACK. A failed initial/periodic/rebuild snapshot is logged and skipped (the hot state is
+rebuildable); a failed `FINAL` snapshot raises, nothing is committed to Redis, and the event is
+retried.
+
+### Gaps and intervals
+
+`gap_basis` is `LAP_END`: when a driver completes lap N, `gap_to_leader_ms` is that crossing
+minus the first crossing of lap N by any driver, and `interval_to_ahead_ms` is the crossing
+minus that of the driver reported one position ahead on lap N. A bounded window of recent
+crossings is kept; both values are `null` whenever they cannot be derived (outside the
+window, no position, car ahead not on the same lap yet). Lapped cars have a gap relative to
+the same lap number plus `laps_behind_leader`. Values update only when the driver crosses the
+line. Crossing times can come from fallbacks (`completion_time_source`), which lowers accuracy.
+
+### Endpoints
+
+```bash
+curl http://127.0.0.1:8000/replays/$REPLAY_ID/state
+curl http://127.0.0.1:8000/replays/$REPLAY_ID/state/drivers/NOR     # abbreviation or driver UUID
+```
+
+404 unknown replay, unknown driver, or no state available (nothing processed yet or expired:
+check the worker is running); 409 replay not started; 503 Redis (or database) unavailable.
+With Redis down the endpoint does not fall back to an older snapshot, because presenting it
+as current would mislead. If Redis simply has no state, the latest snapshot is served with
+`source: "snapshot"`.
+
+### Scaling
+
+Run **one** worker. Several workers converge to the same state (compare-and-set on the state
+document, in-process conflict retries, bounded gap wait then rebuild), but they split
+consecutive sequences, so they repeatedly wait, conflict or rebuild the same ranges and
+duplicate work; nothing partitions replays between them (that would need per-replay stream
+partitioning, not implemented).
+
+### Known limitations
+
+- Gaps and intervals are `LAP_END` values and often `null` (see above); tyre information is
+  only as complete as the lap/pit events carrying it (compound, age or stint can be `null`).
+- No sector data.
+- Retirements are not visible mid-race (there is no retirement event); non-finishers are only
+  marked `DID_NOT_FINISH` when the race is finalized, and a car that finished its last lap
+  before the leader's chequered flag cannot be told apart from one that retired.
+- Positions have lap-end granularity, so two drivers may briefly share a position number.
+- After a restart the previous run's state stays visible until the new run's first event is
+  processed.
+- A missing, failed or dead-lettered raw event no longer stalls the state: it is recovered by a
+  rebuild from the stored timeline after the bounded wait (so the state can lag by up to
+  `RACE_STATE_GAP_WAIT_MS` once). That recovery trusts the stored timeline.
+- Regenerating a timeline during an active replay still breaks rebuild (and completion
+  detection, which uses the event count loaded when the run began): a rebuild that finds
+  non-contiguous or missing stored events fails with `RaceStateRebuildError` and is retried
+  until the timeline is consistent again or the delivery limit dead-letters the event. The same
+  happens when the session data needed for seeding is gone.
+- Seeking is not supported.
+
 ## Read endpoints
 
 - `GET /races`
@@ -487,14 +669,14 @@ Default suite (no FastF1 downloads):
 uv run pytest
 ```
 
-Streaming tests use fakeredis. To also run them against a real Redis, point
+Streaming and race state tests use fakeredis. To also run them against a real Redis, point
 `REDIS_TEST_URL` at a disposable instance (never the application's Redis; use a
 separate database number). Tests use uniquely named streams and delete them
 afterwards; they also delete every `stream:processed:*` idempotency key in that
 database, so it must hold nothing else you care about.
 
 ```bash
-REDIS_TEST_URL=redis://localhost:6379/15 uv run pytest tests/streaming
+REDIS_TEST_URL=redis://localhost:6379/15 uv run pytest tests/streaming tests/race_state
 ```
 
 Optional live FastF1 smoke test:
@@ -516,7 +698,7 @@ FASTF1_RUN_EXTERNAL=1 uv run pytest -m external
 | `API_PORT` | no | Bind port |
 | `FASTF1_CACHE_DIR` | no | FastF1 cache directory (default `.fastf1-cache`) |
 | `STREAM_RAW_EVENTS` | no | Raw events stream name (default `race.raw.events`) |
-| `STREAM_STATE_EVENTS` | no | Reserved state events stream (default `race.state.events`) |
+| `STREAM_STATE_EVENTS` | no | Race state events stream (default `race.state.events`) |
 | `STREAM_DETECTED_EVENTS` | no | Reserved detected events stream (default `race.detected.events`) |
 | `STREAM_DEAD_LETTER` | no | Dead-letter stream (default `race.dead_letter.events`) |
 | `STREAM_MAXLEN` | no | Approximate raw stream retention, `0` = unbounded (default `100000`) |
@@ -527,5 +709,10 @@ FASTF1_RUN_EXTERNAL=1 uv run pytest -m external
 | `STREAM_RECLAIM_IDLE_MS` | no | Idle time before a pending message is reclaimed (default `30000`) |
 | `STREAM_PUBLISH_ATTEMPTS` | no | Publish attempts on connection errors (default `3`) |
 | `STREAM_IDEMPOTENCY_TTL_SECONDS` | no | Processed-event marker TTL (default `86400`) |
+| `RACE_STATE_LAP_HISTORY` | no | Laps kept per driver in `recent_laps` and in the gap crossing window (default `10`) |
+| `RACE_STATE_SNAPSHOT_EVERY_LAPS` | no | PostgreSQL snapshot every N leader laps, `0` disables (default `10`) |
+| `RACE_STATE_TTL_SECONDS` | no | TTL of the Redis state document, refreshed on every write (default `604800`) |
+| `RACE_STATE_GAP_WAIT_MS` | no | Max in-process wait for a missing predecessor before rebuilding from the timeline (default `1500`) |
+| `RACE_STATE_KEY_PREFIX` | no | Redis key prefix of the state document (default `race`) |
 
 Copy `.env.example` for local values. Do not commit `.env`.

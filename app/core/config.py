@@ -46,6 +46,15 @@ class Settings(BaseSettings):
         default=86_400, ge=1, alias="STREAM_IDEMPOTENCY_TTL_SECONDS"
     )
 
+    # Race State Engine (see app/race_state/config.py).
+    race_state_lap_history: int = Field(default=10, ge=1, alias="RACE_STATE_LAP_HISTORY")
+    race_state_snapshot_every_laps: int = Field(
+        default=10, ge=0, alias="RACE_STATE_SNAPSHOT_EVERY_LAPS"
+    )
+    race_state_ttl_seconds: int = Field(default=604_800, ge=1, alias="RACE_STATE_TTL_SECONDS")
+    race_state_gap_wait_ms: int = Field(default=1_500, ge=0, alias="RACE_STATE_GAP_WAIT_MS")
+    race_state_key_prefix: str = Field(default="race", min_length=1, alias="RACE_STATE_KEY_PREFIX")
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -8,6 +8,7 @@ from app.models.lap import Lap
 from app.models.race import Race
 from app.models.race_event import RaceEvent
 from app.models.race_session import RaceSession
+from app.models.race_state_snapshot import RaceStateSnapshot
 from app.models.replay_session import ReplaySession
 from app.models.sector import Sector
 from app.models.session_timeline import SessionTimeline
@@ -20,6 +21,7 @@ __all__ = [
     "Race",
     "RaceEvent",
     "RaceSession",
+    "RaceStateSnapshot",
     "ReplaySession",
     "Sector",
     "SessionTimeline",

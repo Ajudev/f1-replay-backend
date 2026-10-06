@@ -12,6 +12,12 @@ from app.ingestion.errors import (
     SessionLoadError,
     SessionNotFoundError,
 )
+from app.race_state.errors import (
+    DriverNotInStateError,
+    RaceStateStoreUnavailableError,
+    RaceStateUnavailableError,
+    ReplayNotStartedError,
+)
 from app.replay.errors import (
     InvalidPlaybackSpeedError,
     InvalidReplayTransitionError,
@@ -154,5 +160,33 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def replay_persistence_error_handler(
         _request: Request,
         exc: ReplayPersistenceError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=503, content={"detail": exc.message})
+
+    @app.exception_handler(ReplayNotStartedError)
+    async def replay_not_started_handler(
+        _request: Request,
+        exc: ReplayNotStartedError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": exc.message})
+
+    @app.exception_handler(RaceStateUnavailableError)
+    async def race_state_unavailable_handler(
+        _request: Request,
+        exc: RaceStateUnavailableError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": exc.message})
+
+    @app.exception_handler(DriverNotInStateError)
+    async def driver_not_in_state_handler(
+        _request: Request,
+        exc: DriverNotInStateError,
+    ) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": exc.message})
+
+    @app.exception_handler(RaceStateStoreUnavailableError)
+    async def race_state_store_unavailable_handler(
+        _request: Request,
+        exc: RaceStateStoreUnavailableError,
     ) -> JSONResponse:
         return JSONResponse(status_code=503, content={"detail": exc.message})

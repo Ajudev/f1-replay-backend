@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.exceptions import register_exception_handlers
 from app.api.health import router as health_router
+from app.api.race_state import router as race_state_router
 from app.api.races import router as races_router
 from app.api.replays import router as replays_router
 from app.api.timeline import router as timeline_router
@@ -17,6 +18,9 @@ from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.db.session import create_engine, create_session_factory
 from app.infrastructure.redis import RedisClient
+from app.race_state.config import RaceStateConfig
+from app.race_state.repository import RaceStateStore
+from app.race_state.service import RaceStateService
 from app.replay.clock import AsyncioReplayTimer
 from app.replay.errors import ReplayPersistenceError
 from app.replay.service import ReplayService
@@ -38,10 +42,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Replay events go to Redis Streams over the app's shared connection pool. The
     # client connects lazily, so startup succeeds with Redis down; a publish failure
     # fails the replay explicitly. Consumers run as separate processes (CLI).
+    stream_config = StreamConfig.from_settings(settings)
     replay_service = ReplayService(
         session_factory,
-        sink=RedisStreamPublisher(redis, StreamConfig.from_settings(settings)),
+        sink=RedisStreamPublisher(redis, stream_config),
         timer=AsyncioReplayTimer(),
+    )
+    # Read side only: the race state processor runs as its own worker process.
+    race_state_service = RaceStateService(
+        RaceStateStore(
+            redis, stream_config=stream_config, config=RaceStateConfig.from_settings(settings)
+        ),
+        session_factory,
+        replay_service,
     )
 
     app.state.settings = settings
@@ -49,6 +62,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.session_factory = session_factory
     app.state.redis = redis
     app.state.replay_service = replay_service
+    app.state.race_state_service = race_state_service
 
     logger.info(
         "Application starting name=%s env=%s",
@@ -95,6 +109,7 @@ def create_app() -> FastAPI:
     application.include_router(races_router)
     application.include_router(timeline_router)
     application.include_router(replays_router)
+    application.include_router(race_state_router)
     return application
 
 
