@@ -230,6 +230,9 @@ class StateDelta(BaseModel):
     race: dict[str, Any] = Field(default_factory=dict)
     #: Full state of every driver that changed.
     drivers: list[DriverState] = Field(default_factory=list)
+    #: Ids (subset of ``drivers``) whose position / pit status changed in this transition.
+    position_changes: list[UUID] = Field(default_factory=list)
+    pit_changes: list[UUID] = Field(default_factory=list)
     #: Snapshot due after this transition (deterministic; not published).
     snapshot_trigger: SnapshotTrigger | None = None
 

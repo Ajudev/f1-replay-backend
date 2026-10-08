@@ -42,6 +42,8 @@ def build_state_event(
         "changes": {
             "race": delta.race,
             "drivers": [d.model_dump(mode="json") for d in delta.drivers],
+            "position_changes": [str(i) for i in delta.position_changes],
+            "pit_changes": [str(i) for i in delta.pit_changes],
         },
     }
     if event_type is not StateEventType.STATE_UPDATED:

@@ -6,18 +6,17 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.api.detection import router as detection_router
 from app.api.exceptions import register_exception_handlers
 from app.api.health import router as health_router
-from app.api.race_state import router as race_state_router
-from app.api.races import router as races_router
-from app.api.replays import router as replays_router
-from app.api.timeline import router as timeline_router
+from app.api.router import OPENAPI_TAGS, api_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.db.session import create_engine, create_session_factory
+from app.gateway.config import GatewayConfig
+from app.gateway.gateway import WebSocketGateway
 from app.infrastructure.redis import RedisClient
 from app.race_state.config import RaceStateConfig
 from app.race_state.repository import RaceStateStore
@@ -25,6 +24,7 @@ from app.race_state.service import RaceStateService
 from app.replay.clock import AsyncioReplayTimer
 from app.replay.errors import ReplayPersistenceError
 from app.replay.service import ReplayService
+from app.services.timing import ReplayTimingService
 from app.streaming.config import StreamConfig
 from app.streaming.publisher import RedisStreamPublisher
 
@@ -57,6 +57,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         session_factory,
         replay_service,
     )
+    # Delivery only: tails the state/detected streams and the replay lifecycle.
+    ws_gateway = WebSocketGateway(
+        redis=redis,
+        stream_config=stream_config,
+        replay_service=replay_service,
+        race_state_service=race_state_service,
+        config=GatewayConfig.from_settings(settings),
+    )
 
     app.state.settings = settings
     app.state.engine = engine
@@ -64,6 +72,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.redis = redis
     app.state.replay_service = replay_service
     app.state.race_state_service = race_state_service
+    app.state.timing_service = ReplayTimingService(replay_service, session_factory)
+    app.state.ws_gateway = ws_gateway
 
     logger.info(
         "Application starting name=%s env=%s",
@@ -71,9 +81,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         settings.app_env,
     )
     await _recover_interrupted_replays(replay_service)
+    await ws_gateway.start()
     try:
         yield
     finally:
+        await ws_gateway.stop()
         await app.state.replay_service.shutdown()
         # Close whatever client is currently on app.state (tests may replace it).
         await app.state.redis.aclose()
@@ -100,18 +112,28 @@ async def _recover_interrupted_replays(service: ReplayService) -> None:
 
 def create_app() -> FastAPI:
     """Build and return the FastAPI application."""
+    settings = get_settings()
     application = FastAPI(
         title="F1 Replay API",
         version="0.1.0",
+        description=(
+            "Replay historical Formula 1 races as if live: browse imported races, control "
+            "replays, read the authoritative race state, detected events and timing series, "
+            "and stream live updates over WebSocket (`/api/v1/replays/{replay_id}/stream`)."
+        ),
+        openapi_tags=OPENAPI_TAGS,
         lifespan=lifespan,
+    )
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization"],
     )
     register_exception_handlers(application)
     application.include_router(health_router)
-    application.include_router(races_router)
-    application.include_router(timeline_router)
-    application.include_router(replays_router)
-    application.include_router(race_state_router)
-    application.include_router(detection_router)
+    application.include_router(api_router)
     return application
 
 

@@ -45,27 +45,27 @@ async def test_post_generates_then_reports_already_generated(
     api: tuple[AsyncClient, str],
 ) -> None:
     client, sid = api
-    first = await client.post(f"/sessions/{sid}/timeline", json={"regenerate": False})
+    first = await client.post(f"/api/v1/sessions/{sid}/timeline", json={"regenerate": False})
     assert first.status_code == 201
     body = first.json()
     assert body["status"] == "generated"
     assert body["event_count"] == sum(body["counts_by_type"].values())
     assert body["counts_by_type"]["RACE_STARTED"] == 1
 
-    second = await client.post(f"/sessions/{sid}/timeline")
+    second = await client.post(f"/api/v1/sessions/{sid}/timeline")
     assert second.status_code == 200
     assert second.json()["status"] == "already_generated"
 
-    third = await client.post(f"/sessions/{sid}/timeline", json={"regenerate": True})
+    third = await client.post(f"/api/v1/sessions/{sid}/timeline", json={"regenerate": True})
     assert third.status_code == 201
     assert third.json()["status"] == "regenerated"
 
 
 async def test_get_events_paginated_ordered_with_filters(api: tuple[AsyncClient, str]) -> None:
     client, sid = api
-    await client.post(f"/sessions/{sid}/timeline")
+    await client.post(f"/api/v1/sessions/{sid}/timeline")
 
-    page = await client.get(f"/sessions/{sid}/timeline", params={"limit": 4})
+    page = await client.get(f"/api/v1/sessions/{sid}/timeline", params={"limit": 4})
     assert page.status_code == 200
     body = page.json()
     assert body["limit"] == 4 and body["offset"] == 0
@@ -83,14 +83,14 @@ async def test_get_events_paginated_ordered_with_filters(api: tuple[AsyncClient,
     }
 
     filtered = await client.get(
-        f"/sessions/{sid}/timeline",
+        f"/api/v1/sessions/{sid}/timeline",
         params=[("event_type", "PIT_ENTRY"), ("event_type", "PIT_EXIT"), ("driver", "HAM")],
     )
     items = filtered.json()["items"]
     assert [e["event_type"] for e in items] == ["PIT_ENTRY", "PIT_EXIT"]
 
     laps = await client.get(
-        f"/sessions/{sid}/timeline",
+        f"/api/v1/sessions/{sid}/timeline",
         params={"event_type": "LAP_COMPLETED", "lap_from": 5, "lap_to": 5},
     )
     assert laps.json()["total"] == 3
@@ -98,8 +98,8 @@ async def test_get_events_paginated_ordered_with_filters(api: tuple[AsyncClient,
 
 async def test_summary_endpoint(api: tuple[AsyncClient, str]) -> None:
     client, sid = api
-    await client.post(f"/sessions/{sid}/timeline")
-    response = await client.get(f"/sessions/{sid}/timeline/summary")
+    await client.post(f"/api/v1/sessions/{sid}/timeline")
+    response = await client.get(f"/api/v1/sessions/{sid}/timeline/summary")
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "available"
@@ -111,28 +111,30 @@ async def test_summary_endpoint(api: tuple[AsyncClient, str]) -> None:
 
 async def test_not_generated_returns_actionable_404(api: tuple[AsyncClient, str]) -> None:
     client, sid = api
-    for path in (f"/sessions/{sid}/timeline", f"/sessions/{sid}/timeline/summary"):
+    for path in (f"/api/v1/sessions/{sid}/timeline", f"/api/v1/sessions/{sid}/timeline/summary"):
         response = await client.get(path)
         assert response.status_code == 404
-        assert "POST" in response.json()["detail"]
+        assert "POST" in response.json()["message"]
 
 
 async def test_unknown_session_returns_404(api: tuple[AsyncClient, str]) -> None:
     client, _ = api
     missing = uuid4()
-    assert (await client.post(f"/sessions/{missing}/timeline")).status_code == 404
-    assert (await client.get(f"/sessions/{missing}/timeline")).status_code == 404
-    assert (await client.get(f"/sessions/{missing}/timeline/summary")).status_code == 404
+    assert (await client.post(f"/api/v1/sessions/{missing}/timeline")).status_code == 404
+    assert (await client.get(f"/api/v1/sessions/{missing}/timeline")).status_code == 404
+    assert (await client.get(f"/api/v1/sessions/{missing}/timeline/summary")).status_code == 404
 
 
 async def test_query_validation(api: tuple[AsyncClient, str]) -> None:
     client, sid = api
-    assert (await client.get(f"/sessions/{sid}/timeline", params={"limit": 0})).status_code == 422
     assert (
-        await client.get(f"/sessions/{sid}/timeline", params={"limit": 1001})
+        await client.get(f"/api/v1/sessions/{sid}/timeline", params={"limit": 0})
     ).status_code == 422
     assert (
-        await client.get(f"/sessions/{sid}/timeline", params={"event_type": "NOPE"})
+        await client.get(f"/api/v1/sessions/{sid}/timeline", params={"limit": 1001})
+    ).status_code == 422
+    assert (
+        await client.get(f"/api/v1/sessions/{sid}/timeline", params={"event_type": "NOPE"})
     ).status_code == 422
 
 
@@ -163,8 +165,9 @@ async def test_validation_failure_returns_422_with_problems(
     application.dependency_overrides[get_db] = override_db
     transport = ASGITransport(app=application)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(f"/sessions/{src.session_id}/timeline")
+        response = await client.post(f"/api/v1/sessions/{src.session_id}/timeline")
     assert response.status_code == 422
     body = response.json()
-    assert "failed validation" in body["detail"]
-    assert body["problems"]
+    assert body["code"] == "TIMELINE_INVALID"
+    assert "failed validation" in body["message"]
+    assert body["details"]["problems"]

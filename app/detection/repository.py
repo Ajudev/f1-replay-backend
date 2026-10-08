@@ -104,6 +104,13 @@ class DetectedEventRepository:
             .limit(1)
         )
 
+    async def get(self, replay_id: UUID, event_id: UUID) -> DetectedEventRow | None:
+        return await self._session.scalar(
+            select(DetectedEventRow).where(
+                DetectedEventRow.replay_id == replay_id, DetectedEventRow.id == event_id
+            )
+        )
+
     async def list(self, query: DetectedEventQuery) -> tuple[list[DetectedEventRow], int]:
         conditions = self._conditions(query)
         total = await self._session.scalar(

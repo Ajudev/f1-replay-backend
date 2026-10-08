@@ -18,7 +18,7 @@ from app.schemas.timeline import (
 )
 from app.timeline.service import TimelineService, TimelineSummary
 
-router = APIRouter(tags=["timeline"])
+router = APIRouter(tags=["Data Management"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 

@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.detection.errors import DetectedEventNotFoundError
 from app.detection.repository import DetectedEventQuery, DetectedEventRepository
 from app.models import DetectedEvent as DetectedEventRow
 from app.replay.errors import ReplayNotFoundError, ReplayPersistenceError
@@ -59,3 +60,17 @@ class DetectedEventService:
             logger.exception("Detected events read failed replay_id=%s", query.replay_id)
             raise ReplayPersistenceError("Detected event storage unavailable") from exc
         return DetectedEventPage(query.replay_id, run_id, rows, total, query.limit, query.offset)
+
+    async def get_event(self, replay_id: UUID, event_id: UUID) -> DetectedEventRow:
+        """One detection of a replay (any run)."""
+        repo = DetectedEventRepository(self._session)
+        try:
+            if not await repo.replay_exists(replay_id):
+                raise ReplayNotFoundError(replay_id)
+            row = await repo.get(replay_id, event_id)
+        except SQLAlchemyError as exc:
+            logger.exception("Detected event read failed replay_id=%s", replay_id)
+            raise ReplayPersistenceError("Detected event storage unavailable") from exc
+        if row is None:
+            raise DetectedEventNotFoundError(replay_id, event_id)
+        return row

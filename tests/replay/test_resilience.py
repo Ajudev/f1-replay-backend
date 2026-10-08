@@ -84,26 +84,28 @@ async def test_read_failures_return_503_via_api(
 
     fault.break_("get")
     for response in (
-        await api.get(f"/replays/{replay_id}"),
-        await api.post(f"/replays/{replay_id}/start"),
-        await api.post(f"/replays/{replay_id}/pause"),
-        await api.put(f"/replays/{replay_id}/speed", json={"playback_speed": 5}),
+        await api.get(f"/api/v1/replays/{replay_id}"),
+        await api.post(f"/api/v1/replays/{replay_id}/start"),
+        await api.post(f"/api/v1/replays/{replay_id}/pause"),
+        await api.patch(f"/api/v1/replays/{replay_id}/speed", json={"playback_speed": 5}),
     ):
         assert response.status_code == 503
-        assert response.json()["detail"] == "Replay storage unavailable"
+        assert response.json()["message"] == "Replay storage unavailable"
     fault.heal()
 
     fault.break_("load_timeline")
-    assert (await api.post(f"/replays/{replay_id}/start")).status_code == 503
+    assert (await api.post(f"/api/v1/replays/{replay_id}/start")).status_code == 503
     fault.heal()
     assert replay_env.service.active_replay_ids() == []
 
     for name in ("session_race_id", "timeline_exists"):
         fault.break_(name)
-        assert (await api.post("/replays", json={"session_id": session_id})).status_code == 503
+        assert (
+            await api.post("/api/v1/replays", json={"session_id": session_id})
+        ).status_code == 503
         fault.heal()
 
-    assert (await api.post(f"/replays/{replay_id}/start")).status_code == 200
+    assert (await api.post(f"/api/v1/replays/{replay_id}/start")).status_code == 200
 
 
 async def test_restart_read_failure_returns_503_and_keeps_running(
@@ -113,13 +115,13 @@ async def test_restart_read_failure_returns_503_and_keeps_running(
     await replay_env.service.start(replay_id)
 
     fault.break_("get")
-    assert (await api.post(f"/replays/{replay_id}/restart")).status_code == 503
+    assert (await api.post(f"/api/v1/replays/{replay_id}/restart")).status_code == 503
     fault.heal()
     fault.break_("load_timeline")
-    assert (await api.post(f"/replays/{replay_id}/restart")).status_code == 503
+    assert (await api.post(f"/api/v1/replays/{replay_id}/restart")).status_code == 503
     fault.heal()
 
-    assert (await api.get(f"/replays/{replay_id}")).json()["status"] == "RUNNING"
+    assert (await api.get(f"/api/v1/replays/{replay_id}")).json()["status"] == "RUNNING"
     assert replay_env.service.active_replay_ids() == [replay_id]
 
 
@@ -142,20 +144,20 @@ async def test_failed_pause_save_keeps_memory_state_and_retries_on_next_access(
     await replay_env.timer.advance(50)
 
     fault.break_("save")
-    response = await api.post(f"/replays/{replay_id}/pause")
+    response = await api.post(f"/api/v1/replays/{replay_id}/pause")
     assert response.status_code == 503
 
     # The read still works and reports the in-memory state even though the deferred
     # write keeps failing.
-    body = (await api.get(f"/replays/{replay_id}")).json()
+    body = (await api.get(f"/api/v1/replays/{replay_id}")).json()
     assert body["status"] == "PAUSED" and body["current_race_time_ms"] == 50_000
     assert (await persisted(session_factory, replay_id)).status is ReplayStatus.RUNNING
 
     # A retry follows the state machine instead of re-applying the change.
-    assert (await api.post(f"/replays/{replay_id}/pause")).status_code == 409
+    assert (await api.post(f"/api/v1/replays/{replay_id}/pause")).status_code == 409
 
     fault.heal()
-    assert (await api.get(f"/replays/{replay_id}")).json()["status"] == "PAUSED"
+    assert (await api.get(f"/api/v1/replays/{replay_id}")).json()["status"] == "PAUSED"
     row = await persisted(session_factory, replay_id)
     assert row.status is ReplayStatus.PAUSED and row.paused_at is not None
     assert row.current_race_time_ms == 50_000

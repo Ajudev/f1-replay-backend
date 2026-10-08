@@ -28,6 +28,19 @@ class Settings(BaseSettings):
     api_port: int = Field(alias="API_PORT")
     fastf1_cache_dir: str = Field(default=".fastf1-cache", alias="FASTF1_CACHE_DIR")
 
+    # Comma-separated browser origins allowed by CORS. Defaults cover local frontend
+    # dev servers only; set the real frontend origin(s) in every deployed environment.
+    cors_allowed_origins: str = Field(
+        default="http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000",
+        alias="CORS_ALLOWED_ORIGINS",
+    )
+
+    # WebSocket gateway (see app/gateway/config.py).
+    ws_client_queue_size: int = Field(default=512, ge=8, alias="WS_CLIENT_QUEUE_SIZE")
+    ws_send_timeout_seconds: float = Field(default=5.0, gt=0, alias="WS_SEND_TIMEOUT_SECONDS")
+    ws_clock_interval_ms: int = Field(default=1000, ge=100, alias="WS_CLOCK_INTERVAL_MS")
+    ws_stream_block_ms: int = Field(default=1000, ge=10, alias="WS_STREAM_BLOCK_MS")
+
     # Redis Streams transport (see app/streaming/config.py for how these are used).
     stream_raw_events: str = Field(default="race.raw.events", alias="STREAM_RAW_EVENTS")
     stream_state_events: str = Field(default="race.state.events", alias="STREAM_STATE_EVENTS")
@@ -103,6 +116,10 @@ class Settings(BaseSettings):
     detection_anomaly_min_deviation_ms: int = Field(
         default=2_000, ge=1, alias="DETECTION_ANOMALY_MIN_DEVIATION_MS"
     )
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
 
 
 @lru_cache

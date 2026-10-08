@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import weakref
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -63,6 +63,11 @@ class ReplayView:
     created_at: datetime
 
 
+#: Called synchronously after every lifecycle change (including speed changes and the
+#: replay finishing on its own). Must be fast and must not raise.
+ReplayListener = Callable[[ReplayView], None]
+
+
 class ReplayService:
     def __init__(
         self,
@@ -77,17 +82,46 @@ class ReplayService:
         self._timer = timer
         self._stop_timeout = stop_timeout
         self._runners: dict[UUID, ReplayRunner] = {}
+        # Run id of the latest runner per replay; survives the runner's retirement.
+        self._last_run_ids: dict[UUID, UUID] = {}
         # Live runners whose latest in-memory state failed to persist.
         self._dirty: set[UUID] = set()
         # Terminal states (runner already unregistered) that failed to persist.
         self._pending_saves: dict[UUID, ReplayState] = {}
         # Locks disappear once no command holds or awaits them.
         self._locks: weakref.WeakValueDictionary[UUID, asyncio.Lock] = weakref.WeakValueDictionary()
+        # Record of each live runner's replay, so a self-finishing run can be reported
+        # without a database read.
+        self._records: dict[UUID, ReplayRecord] = {}
+        self._listeners: list[ReplayListener] = []
 
     # -- queries --------------------------------------------------------------
 
     def active_replay_ids(self) -> list[UUID]:
         return list(self._runners)
+
+    def current_run_id(self, replay_id: UUID) -> UUID | None:
+        """Run id of the replay's latest start/restart in this process (no database).
+
+        Stays available after the runner retires (completed, stopped, failed); ``None`` when
+        the replay has not run in this process.
+        """
+        return self._last_run_ids.get(replay_id)
+
+    def live_state(self, replay_id: UUID) -> ReplayState | None:
+        """In-memory state of a replay running in this process (no database, no lock);
+        ``None`` when no runner is registered."""
+        runner = self._runners.get(replay_id)
+        return runner.snapshot() if runner is not None else None
+
+    # -- listeners ----------------------------------------------------------------
+
+    def add_listener(self, listener: ReplayListener) -> None:
+        self._listeners.append(listener)
+
+    def remove_listener(self, listener: ReplayListener) -> None:
+        with suppress(ValueError):
+            self._listeners.remove(listener)
 
     async def get(self, replay_id: UUID) -> ReplayView:
         async with self._lock(replay_id):
@@ -108,7 +142,7 @@ class ReplayService:
                 if not await repo.timeline_exists(session_id):
                     raise ReplayTimelineUnavailableError(
                         f"No timeline has been generated for session {session_id}; "
-                        f"POST /sessions/{session_id}/timeline to generate it"
+                        f"POST /api/v1/sessions/{session_id}/timeline to generate it"
                     )
                 replay_id = await repo.create(session_id, speed)
                 await db.commit()
@@ -136,7 +170,9 @@ class ReplayService:
             runner = self._runner_for(state, ReplayCommand.PAUSE)
             runner.pause()
             state = runner.snapshot()
-            await self._persist(state)
+            # The in-memory change stands even if the save fails: report it either way.
+            with self._notifying(record, state):
+                await self._persist(state)
             self._log_transition("paused", record, state)
             return self._view(record, state)
 
@@ -146,7 +182,8 @@ class ReplayService:
             runner = self._runner_for(state, ReplayCommand.RESUME)
             runner.resume()
             state = runner.snapshot()
-            await self._persist(state)
+            with self._notifying(record, state):
+                await self._persist(state)
             self._log_transition("resumed", record, state)
             return self._view(record, state)
 
@@ -157,7 +194,8 @@ class ReplayService:
             runner = self._runner_for(state, ReplayCommand.STOP)
             await runner.stop(timeout=self._stop_timeout)  # no DB session is open here
             state = runner.snapshot()
-            await self._retire(state)
+            with self._notifying(record, state):
+                await self._retire(state)
             self._log_transition("stopped", record, state)
             return self._view(record, state)
 
@@ -177,7 +215,8 @@ class ReplayService:
                 state = runner.snapshot()
             else:
                 state = replace(state, playback_speed=speed)
-            await self._persist(state)
+            with self._notifying(record, state):
+                await self._persist(state)
             logger.info(
                 "Replay speed changed replay_id=%s session_id=%s status=%s speed=%s->%s "
                 "race_time_ms=%d lap=%s",
@@ -333,20 +372,28 @@ class ReplayService:
                 # Restart: the old loop must exit before the new one begins.
                 await previous.halt(timeout=self._stop_timeout)
             self._runners[replay_id] = runner
+            self._last_run_ids[replay_id] = runner.run_id
+            self._records[replay_id] = record
             runner.launch()
             self._log_transition(
                 "restarted" if command is ReplayCommand.RESTART else "started", record, new_state
             )
-            return self._view(record, runner.snapshot())
+            view = self._view(record, runner.snapshot())
+            self._notify(view)
+            return view
 
     async def _on_finished(self, runner: ReplayRunner) -> None:
         """Persist COMPLETED/FAILED once the runner's loop ends on its own."""
         async with self._lock(runner.replay_id):
             if self._runners.get(runner.replay_id) is not runner:
                 return  # superseded by stop/restart/shutdown
+            record = self._records.get(runner.replay_id)
+            state = runner.snapshot()
             # Failure is logged; the terminal state stays pending and is retried on access.
             with suppress(ReplayPersistenceError):
-                await self._retire(runner.snapshot())
+                await self._retire(state)
+            if record is not None:
+                self._notify(self._view(record, state))
 
     async def _retire(self, state: ReplayState) -> None:
         """Unregister the runner (terminal state) and persist; never lose the state.
@@ -356,6 +403,7 @@ class ReplayService:
         """
         replay_id = state.replay_id
         self._runners.pop(replay_id, None)
+        self._records.pop(replay_id, None)
         self._dirty.discard(replay_id)
         self._pending_saves[replay_id] = state
         await self._save(state)
@@ -401,6 +449,25 @@ class ReplayService:
                 f"Replay is {state.status.value} but the state is not saved yet; "
                 "GET the replay for its current state"
             ) from exc
+
+    @contextmanager
+    def _notifying(self, record: ReplayRecord, state: ReplayState) -> Iterator[None]:
+        """Notify listeners of ``state`` when the block exits, even if it raised."""
+        try:
+            yield
+        finally:
+            self._notify(self._view(record, state))
+
+    def _notify(self, view: ReplayView) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(view)
+            except Exception:
+                logger.exception(
+                    "Replay listener failed replay_id=%s status=%s",
+                    view.state.replay_id,
+                    view.state.status.value,
+                )
 
     @staticmethod
     def _view(record: ReplayRecord, state: ReplayState) -> ReplayView:

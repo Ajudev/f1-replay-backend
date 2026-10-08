@@ -21,6 +21,7 @@ RESPONSE_FIELDS = {
     "session_id",
     "race_id",
     "status",
+    "is_completed",
     "status_reason",
     "playback_speed",
     "current_race_time_ms",
@@ -48,7 +49,7 @@ async def api(replay_env: ReplayEnv) -> AsyncIterator[AsyncClient]:
 
 async def create(api: AsyncClient, env: ReplayEnv, speed: float = 1) -> str:
     response = await api.post(
-        "/replays", json={"session_id": str(env.race.session_id), "playback_speed": speed}
+        "/api/v1/replays", json={"session_id": str(env.race.session_id), "playback_speed": speed}
     )
     assert response.status_code == 201, response.text
     return response.json()["id"]
@@ -56,37 +57,37 @@ async def create(api: AsyncClient, env: ReplayEnv, speed: float = 1) -> str:
 
 async def test_lifecycle_endpoints(api: AsyncClient, replay_env: ReplayEnv) -> None:
     replay_id = await create(api, replay_env, 5)
-    body = (await api.get(f"/replays/{replay_id}")).json()
+    body = (await api.get(f"/api/v1/replays/{replay_id}")).json()
     assert set(body) == RESPONSE_FIELDS
     assert body["status"] == "CREATED" and body["playback_speed"] == 5.0
     assert body["race_id"] == str(replay_env.race.race_id)
 
-    started = await api.post(f"/replays/{replay_id}/start")
+    started = await api.post(f"/api/v1/replays/{replay_id}/start")
     assert started.status_code == 200
     assert started.json()["status"] == "RUNNING"
     assert started.json()["total_events"] == replay_env.event_count
 
     await replay_env.timer.advance(20)  # 100 s of race time at 5x
-    paused = (await api.post(f"/replays/{replay_id}/pause")).json()
+    paused = (await api.post(f"/api/v1/replays/{replay_id}/pause")).json()
     assert paused["status"] == "PAUSED" and paused["current_race_time_ms"] == 100_000
     assert paused["current_lap"] == 2 and paused["total_laps"] == 5
 
-    speed = await api.put(f"/replays/{replay_id}/speed", json={"playback_speed": 20})
+    speed = await api.patch(f"/api/v1/replays/{replay_id}/speed", json={"playback_speed": 20})
     assert speed.status_code == 200
     assert speed.json()["playback_speed"] == 20.0
     assert speed.json()["current_race_time_ms"] == 100_000
 
-    assert (await api.post(f"/replays/{replay_id}/resume")).json()["status"] == "RUNNING"
-    stopped = (await api.post(f"/replays/{replay_id}/stop")).json()
+    assert (await api.post(f"/api/v1/replays/{replay_id}/resume")).json()["status"] == "RUNNING"
+    stopped = (await api.post(f"/api/v1/replays/{replay_id}/stop")).json()
     assert stopped["status"] == "STOPPED" and stopped["ended_at"] is not None
 
-    restarted = (await api.post(f"/replays/{replay_id}/restart")).json()
+    restarted = (await api.post(f"/api/v1/replays/{replay_id}/restart")).json()
     assert restarted["status"] == "RUNNING"
     assert restarted["current_race_time_ms"] == 0 and restarted["playback_speed"] == 20.0
 
     await replay_env.timer.advance(1_000)
-    final = (await api.get(f"/replays/{replay_id}")).json()
-    assert final["status"] == "COMPLETED"
+    final = (await api.get(f"/api/v1/replays/{replay_id}")).json()
+    assert final["status"] == "COMPLETED" and final["is_completed"] is True
     assert final["emitted_event_count"] == replay_env.event_count
 
 
@@ -94,24 +95,28 @@ async def test_invalid_transitions_and_repeats_return_409(
     api: AsyncClient, replay_env: ReplayEnv
 ) -> None:
     replay_id = await create(api, replay_env)
-    response = await api.post(f"/replays/{replay_id}/pause")
+    response = await api.post(f"/api/v1/replays/{replay_id}/pause")
     assert response.status_code == 409
-    assert response.json()["current_status"] == "CREATED"
+    assert response.json() == {
+        "code": "INVALID_REPLAY_TRANSITION",
+        "message": "Cannot pause a replay that is CREATED",
+        "details": {"command": "pause", "current_status": "CREATED"},
+    }
 
-    assert (await api.post(f"/replays/{replay_id}/start")).status_code == 200
-    repeated = await api.post(f"/replays/{replay_id}/start")
-    assert repeated.status_code == 409 and repeated.json()["current_status"] == "RUNNING"
+    assert (await api.post(f"/api/v1/replays/{replay_id}/start")).status_code == 200
+    repeated = await api.post(f"/api/v1/replays/{replay_id}/start")
+    assert repeated.status_code == 409 and repeated.json()["details"]["current_status"] == "RUNNING"
 
-    assert (await api.post(f"/replays/{replay_id}/pause")).status_code == 200
-    again = await api.post(f"/replays/{replay_id}/pause")
-    assert again.status_code == 409 and again.json()["current_status"] == "PAUSED"
+    assert (await api.post(f"/api/v1/replays/{replay_id}/pause")).status_code == 200
+    again = await api.post(f"/api/v1/replays/{replay_id}/pause")
+    assert again.status_code == 409 and again.json()["details"]["current_status"] == "PAUSED"
 
-    assert (await api.post(f"/replays/{replay_id}/stop")).status_code == 200
+    assert (await api.post(f"/api/v1/replays/{replay_id}/stop")).status_code == 200
     for _ in range(2):
-        stop = await api.post(f"/replays/{replay_id}/stop")
-        assert stop.status_code == 409 and stop.json()["current_status"] == "STOPPED"
-    assert (await api.post(f"/replays/{replay_id}/resume")).status_code == 409
-    assert (await api.get(f"/replays/{replay_id}")).json()["status"] == "STOPPED"
+        stop = await api.post(f"/api/v1/replays/{replay_id}/stop")
+        assert stop.status_code == 409 and stop.json()["details"]["current_status"] == "STOPPED"
+    assert (await api.post(f"/api/v1/replays/{replay_id}/resume")).status_code == 409
+    assert (await api.get(f"/api/v1/replays/{replay_id}")).json()["status"] == "STOPPED"
 
 
 @pytest.mark.parametrize("speed", [0, -1, 3, 0.5, 1000, "fast"])
@@ -119,24 +124,28 @@ async def test_invalid_speed_rejected(
     api: AsyncClient, replay_env: ReplayEnv, speed: object
 ) -> None:
     replay_id = await create(api, replay_env)
-    response = await api.put(f"/replays/{replay_id}/speed", json={"playback_speed": speed})
+    response = await api.patch(f"/api/v1/replays/{replay_id}/speed", json={"playback_speed": speed})
     assert response.status_code == 422
+    assert response.json()["code"] in {"INVALID_PLAYBACK_SPEED", "VALIDATION_ERROR"}
     create_response = await api.post(
-        "/replays", json={"session_id": str(replay_env.race.session_id), "playback_speed": speed}
+        "/api/v1/replays",
+        json={"session_id": str(replay_env.race.session_id), "playback_speed": speed},
     )
     assert create_response.status_code == 422
 
 
 async def test_not_found_and_missing_timeline(api: AsyncClient, replay_env: ReplayEnv) -> None:
     missing = uuid4()
-    assert (await api.get(f"/replays/{missing}")).status_code == 404
+    not_found = await api.get(f"/api/v1/replays/{missing}")
+    assert not_found.status_code == 404 and not_found.json()["code"] == "REPLAY_NOT_FOUND"
     for action in ("start", "pause", "resume", "stop", "restart"):
-        assert (await api.post(f"/replays/{missing}/{action}")).status_code == 404
+        assert (await api.post(f"/api/v1/replays/{missing}/{action}")).status_code == 404
     assert (
-        await api.put(f"/replays/{missing}/speed", json={"playback_speed": 2})
+        await api.patch(f"/api/v1/replays/{missing}/speed", json={"playback_speed": 2})
     ).status_code == 404
-    assert (await api.post("/replays", json={"session_id": str(uuid4())})).status_code == 404
-    assert (await api.get("/replays/not-a-uuid")).status_code == 422
+    assert (await api.post("/api/v1/replays", json={"session_id": str(uuid4())})).status_code == 404
+    malformed = await api.get("/api/v1/replays/not-a-uuid")
+    assert malformed.status_code == 422 and malformed.json()["code"] == "VALIDATION_ERROR"
 
 
 async def test_create_without_timeline_returns_409(
@@ -144,6 +153,7 @@ async def test_create_without_timeline_returns_409(
 ) -> None:
     src = replace(representative_race(), season=2021, round=7)
     await seed_source(session_factory, src)
-    response = await api.post("/replays", json={"session_id": str(src.session_id)})
+    response = await api.post("/api/v1/replays", json={"session_id": str(src.session_id)})
     assert response.status_code == 409
-    assert "POST" in response.json()["detail"]
+    assert response.json()["code"] == "REPLAY_TIMELINE_UNAVAILABLE"
+    assert "POST /api/v1/sessions/" in response.json()["message"]

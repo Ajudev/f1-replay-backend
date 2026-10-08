@@ -5,31 +5,47 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Path
 
-from app.race_state.service import RaceStateService
+from app.api.dependencies import DRIVER_PATTERN, RaceStateServiceDep, get_race_state_service
+from app.api.exceptions import error_responses
 from app.schemas.race_state import DriverStateResponse, RaceStateResponse
 
-router = APIRouter(prefix="/replays/{replay_id}/state", tags=["race-state"])
+__all__ = ["router", "get_race_state_service"]
+
+router = APIRouter(prefix="/replays/{replay_id}", tags=["Race State"])
+
+DriverPath = Annotated[
+    str, Path(pattern=DRIVER_PATTERN, description="Driver abbreviation (case-insensitive) or UUID")
+]
 
 
-def get_race_state_service(request: Request) -> RaceStateService:
-    return request.app.state.race_state_service
+@router.get(
+    "/state",
+    response_model=RaceStateResponse,
+    summary="Get the current race state",
+    responses=error_responses(404, 409, 503),
+)
+async def get_race_state(replay_id: UUID, service: RaceStateServiceDep) -> RaceStateResponse:
+    """Authoritative race snapshot with drivers ordered by position.
 
-
-Service = Annotated[RaceStateService, Depends(get_race_state_service)]
-
-
-@router.get("", response_model=RaceStateResponse)
-async def get_race_state(replay_id: UUID, service: Service) -> RaceStateResponse:
-    """Current race state with drivers ordered by position."""
+    409 ``REPLAY_NOT_STARTED`` before the replay starts; 404 ``RACE_STATE_UNAVAILABLE``
+    when nothing has been processed yet. The final state stays available after completion.
+    """
     view = await service.get_state(replay_id)
     return RaceStateResponse.build(view.state, view.source, view.replay_status)
 
 
-@router.get("/drivers/{driver}", response_model=DriverStateResponse)
-async def get_driver_state(replay_id: UUID, driver: str, service: Service) -> DriverStateResponse:
-    """One driver's state, by abbreviation (case-insensitive) or driver UUID."""
+@router.get(
+    "/drivers/{driver}",
+    response_model=DriverStateResponse,
+    summary="Get one driver's current state",
+    responses=error_responses(404, 409, 503),
+)
+async def get_driver_state(
+    replay_id: UUID, driver: DriverPath, service: RaceStateServiceDep
+) -> DriverStateResponse:
+    """Position, gaps, laps, tyres, pit status and recent laps of one driver."""
     view, driver_state = await service.get_driver(replay_id, driver)
     state = view.state
     return DriverStateResponse(

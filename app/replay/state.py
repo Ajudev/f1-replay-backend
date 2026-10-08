@@ -60,16 +60,24 @@ def transition(current: ReplayStatus, command: ReplayCommand) -> ReplayStatus:
     return target
 
 
+def _plain(value: object) -> str:
+    """Client-facing number text (no ``Decimal('...')`` repr)."""
+    try:
+        return format(Decimal(str(value)).normalize(), "f")
+    except (InvalidOperation, ValueError):
+        return str(value)
+
+
 def validate_playback_speed(value: Decimal | float | int | str) -> Decimal:
     """Normalize a requested speed; only ``SUPPORTED_PLAYBACK_SPEEDS`` are accepted."""
     try:
         speed = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
-        raise InvalidPlaybackSpeedError(f"Invalid playback speed: {value!r}") from exc
+        raise InvalidPlaybackSpeedError(f"Invalid playback speed: {_plain(value)}") from exc
     if not speed.is_finite() or speed not in SUPPORTED_PLAYBACK_SPEEDS:
         supported = ", ".join(f"{s}x" for s in SUPPORTED_PLAYBACK_SPEEDS)
         raise InvalidPlaybackSpeedError(
-            f"Unsupported playback speed {value!r}; supported speeds: {supported}"
+            f"Unsupported playback speed {_plain(value)}; supported speeds: {supported}"
         )
     return speed.quantize(Decimal("0.01"))
 

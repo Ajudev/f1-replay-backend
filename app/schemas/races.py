@@ -51,15 +51,9 @@ class RaceImportResponse(BaseModel):
     skipped_count: int
 
 
-class RaceSummary(BaseModel):
-    id: UUID
+class SeasonSummary(BaseModel):
     season: int
-    round: int
-    name: str
-    official_name: str | None
-    country: str | None
-    location: str | None
-    event_date: date | None
+    race_count: int = Field(description="Imported races in the season")
 
 
 class SessionSummary(BaseModel):
@@ -70,7 +64,7 @@ class SessionSummary(BaseModel):
     end_time: datetime | None
 
 
-class RaceDetail(BaseModel):
+class RaceSummary(BaseModel):
     id: UUID
     season: int
     round: int
@@ -79,7 +73,11 @@ class RaceDetail(BaseModel):
     country: str | None
     location: str | None
     event_date: date | None
-    sessions: list[SessionSummary]
+    sessions: list[SessionSummary] = Field(description="Imported sessions of the event")
+
+
+class RaceDetail(RaceSummary):
+    pass
 
 
 class DriverSummary(BaseModel):

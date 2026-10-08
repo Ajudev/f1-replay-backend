@@ -515,6 +515,8 @@ def _diff(old: RaceState, new: RaceState, event: ReducerEvent) -> StateDelta:
     ]
 
     kinds: set[ChangeKind] = set()
+    position_changes: list[UUID] = []
+    pit_changes: list[UUID] = []
     if event.event_type == EventType.RACE_STARTED.value and old.phase is RacePhase.PRE_RACE:
         kinds.add(ChangeKind.RACE_STARTED)
     if event.event_type == EventType.LAP_COMPLETED.value and changed:
@@ -523,8 +525,10 @@ def _diff(old: RaceState, new: RaceState, event: ReducerEvent) -> StateDelta:
         before = old.drivers.get(driver.driver_id)
         if before is not None and before.position != driver.position:
             kinds.add(ChangeKind.POSITION_CHANGED)
+            position_changes.append(driver.driver_id)
         if before is not None and before.pit_status != driver.pit_status:
             kinds.add(ChangeKind.PIT_STATUS_CHANGED)
+            pit_changes.append(driver.driver_id)
     if "track_status" in race:
         kinds.add(ChangeKind.TRACK_STATUS_CHANGED)
     if "fastest_lap" in race:
@@ -536,6 +540,8 @@ def _diff(old: RaceState, new: RaceState, event: ReducerEvent) -> StateDelta:
         kinds=[k for k in ChangeKind if k in kinds],
         race=race,
         drivers=changed,
+        position_changes=position_changes,
+        pit_changes=pit_changes,
     )
 
 

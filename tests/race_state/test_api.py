@@ -60,7 +60,7 @@ async def processed_replay(env: StateEnv, upto: int, status: ReplayStatus = Repl
 async def test_live_state_with_drivers_sorted_by_position(api: ApiEnv) -> None:
     replay_id, _ = await processed_replay(api.env, 12)
 
-    response = await api.client.get(f"/replays/{replay_id}/state")
+    response = await api.client.get(f"/api/v1/replays/{replay_id}/state")
 
     assert response.status_code == 200, response.text
     body = response.json()
@@ -81,7 +81,7 @@ async def test_falls_back_to_the_latest_snapshot_when_redis_has_no_state(api: Ap
     replay_id, events = await processed_replay(env, 14)  # snapshots at 0, 9
     await env.redis.client.delete(env.store.key(replay_id))
 
-    response = await api.client.get(f"/replays/{replay_id}/state")
+    response = await api.client.get(f"/api/v1/replays/{replay_id}/state")
 
     assert response.status_code == 200
     body = response.json()
@@ -90,31 +90,31 @@ async def test_falls_back_to_the_latest_snapshot_when_redis_has_no_state(api: Ap
 
 
 async def test_unknown_replay_is_404(api: ApiEnv) -> None:
-    response = await api.client.get(f"/replays/{uuid4()}/state")
+    response = await api.client.get(f"/api/v1/replays/{uuid4()}/state")
     assert response.status_code == 404
-    assert "Replay not found" in response.json()["detail"]
+    assert "Replay not found" in response.json()["message"]
 
 
 async def test_not_started_replay_is_409(api: ApiEnv) -> None:
     replay_id = await make_replay(api.env.factory, api.env.race.session_id, ReplayStatus.CREATED)
-    response = await api.client.get(f"/replays/{replay_id}/state")
+    response = await api.client.get(f"/api/v1/replays/{replay_id}/state")
     assert response.status_code == 409
-    assert "not been started" in response.json()["detail"]
+    assert "not been started" in response.json()["message"]
 
 
 async def test_state_unavailable_is_404_with_a_distinct_message(api: ApiEnv) -> None:
     replay_id = await make_replay(api.env.factory, api.env.race.session_id)
-    response = await api.client.get(f"/replays/{replay_id}/state")
+    response = await api.client.get(f"/api/v1/replays/{replay_id}/state")
     assert response.status_code == 404
-    assert "No race state is available" in response.json()["detail"]
+    assert "No race state is available" in response.json()["message"]
 
 
 async def test_redis_failure_is_503(api: ApiEnv) -> None:
     replay_id, _ = await processed_replay(api.env, 5)
     api.service._store = BrokenRedisStore()  # type: ignore[assignment]
-    response = await api.client.get(f"/replays/{replay_id}/state")
+    response = await api.client.get(f"/api/v1/replays/{replay_id}/state")
     assert response.status_code == 503
-    assert response.json()["detail"] == "Race state store unavailable"
+    assert response.json()["message"] == "Race state store unavailable"
 
 
 async def test_driver_by_abbreviation_and_by_uuid(api: ApiEnv) -> None:
@@ -123,8 +123,8 @@ async def test_driver_by_abbreviation_and_by_uuid(api: ApiEnv) -> None:
     assert state is not None
     nor = next(d for d in state.drivers.values() if d.abbreviation == "NOR")
 
-    by_abbr = await api.client.get(f"/replays/{replay_id}/state/drivers/nor")
-    by_id = await api.client.get(f"/replays/{replay_id}/state/drivers/{nor.driver_id}")
+    by_abbr = await api.client.get(f"/api/v1/replays/{replay_id}/drivers/nor")
+    by_id = await api.client.get(f"/api/v1/replays/{replay_id}/drivers/{nor.driver_id}")
 
     assert by_abbr.status_code == by_id.status_code == 200
     assert by_abbr.json() == by_id.json()
@@ -136,14 +136,14 @@ async def test_driver_by_abbreviation_and_by_uuid(api: ApiEnv) -> None:
 async def test_unknown_driver_is_404(api: ApiEnv) -> None:
     replay_id, _ = await processed_replay(api.env, 5)
     for driver in ("XXX", str(uuid4())):
-        response = await api.client.get(f"/replays/{replay_id}/state/drivers/{driver}")
+        response = await api.client.get(f"/api/v1/replays/{replay_id}/drivers/{driver}")
         assert response.status_code == 404
-        assert "not part of the race state" in response.json()["detail"]
+        assert "not part of the race state" in response.json()["message"]
 
 
 async def test_app_wires_the_service_in_its_lifespan(client: AsyncClient) -> None:
     # The unconfigured test environment has no replay: 404, but routed and wired.
-    response = await client.get(f"/replays/{uuid4()}/state")
+    response = await client.get(f"/api/v1/replays/{uuid4()}/state")
     assert response.status_code in {404, 503}
 
 
@@ -167,7 +167,7 @@ async def test_snapshot_fallback_uses_the_newest_snapshot_across_runs(api: ApiEn
     assert fresh is not None
     await env.redis.client.delete(env.store.key(replay_id))
 
-    response = await api.client.get(f"/replays/{replay_id}/state")
+    response = await api.client.get(f"/api/v1/replays/{replay_id}/state")
 
     assert response.status_code == 200
     assert response.json()["run_id"] == str(fresh.run_id)  # the INITIAL snapshot of run two

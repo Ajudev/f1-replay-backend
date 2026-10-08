@@ -10,7 +10,7 @@ from app.infrastructure.redis import RedisClient, get_redis
 from app.schemas.health import HealthResponse, ReadinessResponse
 from app.services import health as health_service
 
-router = APIRouter(tags=["health"])
+router = APIRouter(tags=["Health"])
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 RedisDep = Annotated[RedisClient, Depends(get_redis)]

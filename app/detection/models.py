@@ -184,6 +184,8 @@ class StateChanges(BaseModel):
 
     race: dict[str, Any] = Field(default_factory=dict)
     drivers: list[DriverState] = Field(default_factory=list)
+    position_changes: list[UUID] = Field(default_factory=list)
+    pit_changes: list[UUID] = Field(default_factory=list)
 
 
 class StatePayload(BaseModel):

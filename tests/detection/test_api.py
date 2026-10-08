@@ -1,4 +1,4 @@
-"""Persistence of detected events and the ``/replays/{id}/detected-events`` endpoint."""
+"""Persistence of detected events and the ``/replays/{id}/events`` endpoint."""
 
 from __future__ import annotations
 
@@ -146,16 +146,16 @@ async def test_deleting_the_replay_removes_its_detections(detect_env: DetectEnv)
 
 
 async def get(api: ApiEnv, **params: object) -> dict:
-    response = await api.client.get(f"/replays/{api.replay_id}/detected-events", params=params)  # type: ignore[arg-type]
+    response = await api.client.get(f"/api/v1/replays/{api.replay_id}/events", params=params)  # type: ignore[arg-type]
     assert response.status_code == 200, response.text
     return response.json()
 
 
 async def test_unknown_replay_is_404(api: ApiEnv) -> None:
-    response = await api.client.get(f"/replays/{uuid4()}/detected-events")
+    response = await api.client.get(f"/api/v1/replays/{uuid4()}/events")
 
     assert response.status_code == 404
-    assert "Replay not found" in response.json()["detail"]
+    assert "Replay not found" in response.json()["message"]
 
 
 async def test_a_replay_without_detections_returns_an_empty_page(api: ApiEnv) -> None:
@@ -240,7 +240,7 @@ async def test_filters(api: ApiEnv) -> None:
     assert await sequences(limit=2, offset=2) == [3, 4]
     assert (await get(api, limit=2))["total"] == 4
 
-    bad = await api.client.get(f"/replays/{api.replay_id}/detected-events?event_type=NOPE")
+    bad = await api.client.get(f"/api/v1/replays/{api.replay_id}/events?event_type=NOPE")
     assert bad.status_code == 422
 
 
@@ -274,6 +274,6 @@ async def test_a_database_failure_is_a_503(api: ApiEnv) -> None:
     application = api.client._transport.app  # type: ignore[attr-defined]
     application.dependency_overrides[get_db] = broken_db
 
-    response = await api.client.get(f"/replays/{api.replay_id}/detected-events")
+    response = await api.client.get(f"/api/v1/replays/{api.replay_id}/events")
 
     assert response.status_code == 503

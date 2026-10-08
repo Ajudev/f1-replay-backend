@@ -1,85 +1,107 @@
-"""Replay control HTTP routes (thin; lifecycle logic lives in the replay service)."""
+"""Replay lifecycle HTTP routes (thin; the replay service owns the state machine)."""
 
 from __future__ import annotations
 
-from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, status
 
-from app.replay.service import ReplayService, ReplayView
+from app.api.dependencies import ReplayServiceDep, get_replay_service
+from app.api.exceptions import error_responses
 from app.schemas.replays import ReplayCreateRequest, ReplayResponse, ReplaySpeedRequest
 
-router = APIRouter(prefix="/replays", tags=["replays"])
+__all__ = ["router", "get_replay_service"]
+
+router = APIRouter(prefix="/replays", tags=["Replays"])
+
+_COMMAND_ERRORS = error_responses(404, 409, 503)
 
 
-def get_replay_service(request: Request) -> ReplayService:
-    return request.app.state.replay_service
+@router.post(
+    "",
+    response_model=ReplayResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a replay",
+    responses=error_responses(404, 409, 422, 503),
+)
+async def create_replay(body: ReplayCreateRequest, service: ReplayServiceDep) -> ReplayResponse:
+    """Create a replay (``CREATED``) for a session whose timeline has been generated."""
+    return ReplayResponse.from_view(await service.create(body.session_id, body.playback_speed))
 
 
-Service = Annotated[ReplayService, Depends(get_replay_service)]
+@router.get(
+    "/{replay_id}",
+    response_model=ReplayResponse,
+    summary="Get replay status",
+    responses=error_responses(404, 503),
+)
+async def get_replay(replay_id: UUID, service: ReplayServiceDep) -> ReplayResponse:
+    return ReplayResponse.from_view(await service.get(replay_id))
 
 
-def _response(view: ReplayView) -> ReplayResponse:
-    state = view.state
-    return ReplayResponse(
-        id=state.replay_id,
-        session_id=state.session_id,
-        race_id=view.race_id,
-        status=state.status,
-        status_reason=state.status_reason,
-        playback_speed=float(state.playback_speed),
-        current_race_time_ms=state.current_race_time_ms,
-        current_sequence=state.current_sequence,
-        emitted_event_count=state.emitted_event_count,
-        total_events=state.total_events,
-        current_lap=state.current_lap,
-        total_laps=state.total_laps,
-        created_at=view.created_at,
-        started_at=state.started_at,
-        paused_at=state.paused_at,
-        ended_at=state.ended_at,
-    )
+@router.post(
+    "/{replay_id}/start",
+    response_model=ReplayResponse,
+    summary="Start a created replay",
+    responses=_COMMAND_ERRORS,
+)
+async def start_replay(replay_id: UUID, service: ReplayServiceDep) -> ReplayResponse:
+    """``CREATED`` → ``RUNNING``; any other status is 409 ``INVALID_REPLAY_TRANSITION``."""
+    return ReplayResponse.from_view(await service.start(replay_id))
 
 
-@router.post("", response_model=ReplayResponse, status_code=status.HTTP_201_CREATED)
-async def create_replay(body: ReplayCreateRequest, service: Service) -> ReplayResponse:
-    """Create a replay (CREATED) for a session whose timeline has been generated."""
-    return _response(await service.create(body.session_id, body.playback_speed))
+@router.post(
+    "/{replay_id}/pause",
+    response_model=ReplayResponse,
+    summary="Pause a running replay",
+    responses=_COMMAND_ERRORS,
+)
+async def pause_replay(replay_id: UUID, service: ReplayServiceDep) -> ReplayResponse:
+    """``RUNNING`` → ``PAUSED``."""
+    return ReplayResponse.from_view(await service.pause(replay_id))
 
 
-@router.get("/{replay_id}", response_model=ReplayResponse)
-async def get_replay(replay_id: UUID, service: Service) -> ReplayResponse:
-    return _response(await service.get(replay_id))
+@router.post(
+    "/{replay_id}/resume",
+    response_model=ReplayResponse,
+    summary="Resume a paused replay",
+    responses=_COMMAND_ERRORS,
+)
+async def resume_replay(replay_id: UUID, service: ReplayServiceDep) -> ReplayResponse:
+    """``PAUSED`` → ``RUNNING``."""
+    return ReplayResponse.from_view(await service.resume(replay_id))
 
 
-@router.post("/{replay_id}/start", response_model=ReplayResponse)
-async def start_replay(replay_id: UUID, service: Service) -> ReplayResponse:
-    return _response(await service.start(replay_id))
+@router.post(
+    "/{replay_id}/stop",
+    response_model=ReplayResponse,
+    summary="Stop a replay",
+    responses=_COMMAND_ERRORS,
+)
+async def stop_replay(replay_id: UUID, service: ReplayServiceDep) -> ReplayResponse:
+    """``RUNNING``/``PAUSED`` → ``STOPPED`` (terminal; use restart to run again)."""
+    return ReplayResponse.from_view(await service.stop(replay_id))
 
 
-@router.post("/{replay_id}/pause", response_model=ReplayResponse)
-async def pause_replay(replay_id: UUID, service: Service) -> ReplayResponse:
-    return _response(await service.pause(replay_id))
+@router.post(
+    "/{replay_id}/restart",
+    response_model=ReplayResponse,
+    summary="Restart a replay from the beginning",
+    responses=_COMMAND_ERRORS,
+)
+async def restart_replay(replay_id: UUID, service: ReplayServiceDep) -> ReplayResponse:
+    """Any started status → ``RUNNING`` from race time 0 under a new run; keeps the speed."""
+    return ReplayResponse.from_view(await service.restart(replay_id))
 
 
-@router.post("/{replay_id}/resume", response_model=ReplayResponse)
-async def resume_replay(replay_id: UUID, service: Service) -> ReplayResponse:
-    return _response(await service.resume(replay_id))
-
-
-@router.post("/{replay_id}/stop", response_model=ReplayResponse)
-async def stop_replay(replay_id: UUID, service: Service) -> ReplayResponse:
-    return _response(await service.stop(replay_id))
-
-
-@router.post("/{replay_id}/restart", response_model=ReplayResponse)
-async def restart_replay(replay_id: UUID, service: Service) -> ReplayResponse:
-    return _response(await service.restart(replay_id))
-
-
-@router.put("/{replay_id}/speed", response_model=ReplayResponse)
+@router.patch(
+    "/{replay_id}/speed",
+    response_model=ReplayResponse,
+    summary="Change playback speed",
+    responses=error_responses(404, 422, 503),
+)
 async def change_replay_speed(
-    replay_id: UUID, body: ReplaySpeedRequest, service: Service
+    replay_id: UUID, body: ReplaySpeedRequest, service: ReplayServiceDep
 ) -> ReplayResponse:
-    return _response(await service.change_speed(replay_id, body.playback_speed))
+    """Allowed in any status; the virtual race position is preserved."""
+    return ReplayResponse.from_view(await service.change_speed(replay_id, body.playback_speed))

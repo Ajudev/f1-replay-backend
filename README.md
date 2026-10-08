@@ -32,16 +32,17 @@ uv run alembic upgrade head
 uv run fastapi dev
 ```
 
-The API listens on `API_HOST`:`API_PORT` (defaults: `127.0.0.1:8000`).
+The API listens on `API_HOST`:`API_PORT` (defaults: `127.0.0.1:8000`). All application
+endpoints live under `/api/v1` (see "HTTP API"); interactive OpenAPI docs are served at `/docs`.
 
 Health endpoints:
 
-- `GET /health` — liveness
-- `GET /ready` — readiness (Postgres + Redis)
+- `GET /health` — liveness (unversioned)
+- `GET /ready` — readiness (Postgres + Redis; unversioned)
 
 ## Race import
 
-`POST /races/import` loads a historical session through FastF1, normalizes it into
+`POST /api/v1/races/import` loads a historical session through FastF1, normalizes it into
 plain application records, and persists those records in PostgreSQL. After a
 successful import, subsequent reads come only from the database — no FastF1 types
 are involved in query or API layers.
@@ -49,7 +50,7 @@ are involved in query or API layers.
 Example:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/races/import \
+curl -X POST http://127.0.0.1:8000/api/v1/races/import \
   -H 'Content-Type: application/json' \
   -d '{"season": 2024, "round": 1, "session_type": "RACE"}'
 ```
@@ -163,7 +164,7 @@ existing driver/lap, and per-driver lap completion times non-decreasing with lap
 
 ### Persistence and regeneration
 
-`POST /sessions/{id}/timeline` builds and stores the events plus a `session_timelines`
+`POST /api/v1/sessions/{id}/timeline` builds and stores the events plus a `session_timelines`
 metadata row. A repeat call returns `already_generated` (HTTP 200) without rewriting.
 With `{"regenerate": true}` the old events and metadata are deleted and the new ones
 inserted in one transaction (a failed build leaves the old timeline in place).
@@ -181,15 +182,15 @@ with an older schema version. `POST` without `regenerate` still returns
 
 ```bash
 # Generate (201 generated/regenerated, 200 already_generated)
-curl -X POST http://127.0.0.1:8000/sessions/$SESSION_ID/timeline \
+curl -X POST http://127.0.0.1:8000/api/v1/sessions/$SESSION_ID/timeline \
   -H 'Content-Type: application/json' -d '{"regenerate": false}'
 
 # Events ordered by sequence; filters: driver, event_type (repeatable), lap_from,
 # lap_to, limit (1-1000, default 500), offset
-curl "http://127.0.0.1:8000/sessions/$SESSION_ID/timeline?driver=NOR&event_type=PIT_ENTRY&event_type=PIT_EXIT"
+curl "http://127.0.0.1:8000/api/v1/sessions/$SESSION_ID/timeline?driver=NOR&event_type=PIT_ENTRY&event_type=PIT_EXIT"
 
 # Metadata, counts by type and warnings
-curl http://127.0.0.1:8000/sessions/$SESSION_ID/timeline/summary
+curl http://127.0.0.1:8000/api/v1/sessions/$SESSION_ID/timeline/summary
 ```
 
 Reading a timeline that has not been generated returns HTTP 404 explaining how to
@@ -221,7 +222,7 @@ excluded when `lap_from` / `lap_to` is used.
 A replay releases a session's stored historical timeline (`race_events`) in
 `sequence` order as though the race were live. It never calls FastF1, never
 builds or re-sorts the timeline, and does no race-state processing or detection.
-Generate the timeline first (`POST /sessions/{id}/timeline`).
+Generate the timeline first (`POST /api/v1/sessions/{id}/timeline`).
 
 ### Lifecycle
 
@@ -301,7 +302,7 @@ a worker to stop.
 
 A 503 from pause, resume, speed change or stop means the in-memory change
 **applied** but is not yet durable. The in-memory state stays authoritative, so
-`GET /replays/{id}` reports the true state (it does not fail just because the
+`GET /api/v1/replays/{id}` reports the true state (it does not fail just because the
 deferred write failed), and repeating the command follows the normal rules (pause
 on a paused replay is 409). The unsaved state is written again on the next
 access to that replay (and on graceful shutdown). A stopped, completed or failed
@@ -326,13 +327,13 @@ restarted replay (which re-emits from sequence 0) from the original run.
 
 ```bash
 # Create (201); playback_speed defaults to 1
-curl -X POST http://127.0.0.1:8000/replays \
+curl -X POST http://127.0.0.1:8000/api/v1/replays \
   -H 'Content-Type: application/json' \
   -d '{"session_id": "'$SESSION_ID'", "playback_speed": 5}'
 
-curl http://127.0.0.1:8000/replays/$REPLAY_ID
-curl -X POST http://127.0.0.1:8000/replays/$REPLAY_ID/start    # also pause, resume, stop, restart
-curl -X PUT http://127.0.0.1:8000/replays/$REPLAY_ID/speed \
+curl http://127.0.0.1:8000/api/v1/replays/$REPLAY_ID
+curl -X POST http://127.0.0.1:8000/api/v1/replays/$REPLAY_ID/start    # also pause, resume, stop, restart
+curl -X PATCH http://127.0.0.1:8000/api/v1/replays/$REPLAY_ID/speed \
   -H 'Content-Type: application/json' -d '{"playback_speed": 10}'
 ```
 
@@ -492,7 +493,7 @@ uv run python -m app.race_state.worker     # SIGINT / SIGTERM stop it gracefully
 
 ### State structure
 
-`GET /replays/{id}/state` returns (additional bookkeeping such as the gap crossing
+`GET /api/v1/replays/{id}/state` returns (additional bookkeeping such as the gap crossing
 window stays internal):
 
 | Field | Meaning |
@@ -613,8 +614,8 @@ line. Crossing times can come from fallbacks (`completion_time_source`), which l
 ### Endpoints
 
 ```bash
-curl http://127.0.0.1:8000/replays/$REPLAY_ID/state
-curl http://127.0.0.1:8000/replays/$REPLAY_ID/state/drivers/NOR     # abbreviation or driver UUID
+curl http://127.0.0.1:8000/api/v1/replays/$REPLAY_ID/state
+curl http://127.0.0.1:8000/api/v1/replays/$REPLAY_ID/drivers/NOR     # abbreviation or driver UUID
 ```
 
 404 unknown replay, unknown driver, or no state available (nothing processed yet or expired:
@@ -772,7 +773,7 @@ the battle gap, windows shorter than 2 laps) fail at startup with a `ValueError`
 ### Endpoint
 
 ```bash
-curl "http://127.0.0.1:8000/replays/$REPLAY_ID/detected-events?event_type=OVERTAKE&driver=NOR&lap_from=10&limit=50"
+curl "http://127.0.0.1:8000/api/v1/replays/$REPLAY_ID/events?event_type=OVERTAKE&driver=NOR&lap_from=10&limit=50"
 ```
 
 Filters: `event_type` (repeatable), `driver` (abbreviation or UUID, either side), `lap_from`,
@@ -805,14 +806,284 @@ Table `detected_events` (migration `006`), primary key = the deterministic id.
 2. Add one line to `build_default_registry` in `app/detection/registry.py`.
 3. Add a value to `DetectedEventType` if it emits a new type, and thresholds to `DetectionConfig`.
 
-## Read endpoints
+## HTTP API
 
-- `GET /races`
-- `GET /races/{race_id}`
-- `GET /sessions/{session_id}`
-- `GET /sessions/{session_id}/laps`
-- `GET /sessions/{session_id}/stints`
-- `GET /sessions/{session_id}/track-status`
+Everything the frontend needs is under one versioned prefix, `/api/v1` (defined once in
+`app/api/router.py`). `/health` and `/ready` stay unversioned. The frontend never needs to
+know about FastF1, PostgreSQL or Redis: routes are thin and call application services.
+Interactive documentation: `/docs` (Swagger UI), `/redoc`, schema at `/openapi.json`
+(endpoints are grouped by the tags Races, Replays, Race State, Events, Timing, Data
+Management and Health).
+
+### Endpoints
+
+Races (imported historical data, read from PostgreSQL):
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `GET /api/v1/seasons` | Seasons with imported races and their race counts |
+| `GET /api/v1/races` | Imported races; filters `season`, `round`, `event` (name/location text), `session_type` |
+| `GET /api/v1/races/{race_id}` | Race metadata with its imported sessions |
+| `GET /api/v1/races/{race_id}/drivers` | Participating drivers |
+| `GET /api/v1/races/{race_id}/laps` | Historical laps, paginated (`limit` 1-500, default 100; `offset`; `driver`; `lap_from`; `lap_to`) |
+| `GET /api/v1/sessions/{session_id}` | Session metadata |
+| `GET /api/v1/sessions/{session_id}/laps`, `/stints`, `/track-status` | Laps (paginated as above), tyre stints, track status periods |
+
+Replays (lifecycle is owned by the replay service, see "Race replay"):
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `POST /api/v1/replays` | Create (`{"session_id", "playback_speed"}`), 201 |
+| `GET /api/v1/replays/{replay_id}` | Status, virtual clock, lap progress |
+| `POST /api/v1/replays/{replay_id}/start`, `/pause`, `/resume`, `/stop`, `/restart` | Playback control |
+| `PATCH /api/v1/replays/{replay_id}/speed` | `{"playback_speed": 5}` (supported speeds only) |
+| `WS /api/v1/replays/{replay_id}/stream` | Live updates, see "WebSocket API" |
+
+Race state, events and timing (scoped to a replay and to what it has released so far):
+
+| Method and path | Purpose |
+|-----------------|---------|
+| `GET /api/v1/replays/{replay_id}/state` | Full race state snapshot (see "Race state") |
+| `GET /api/v1/replays/{replay_id}/drivers/{driver}` | One driver's state; `driver` is an abbreviation or UUID |
+| `GET /api/v1/replays/{replay_id}/events` | Detected events (see "Event detection") |
+| `GET /api/v1/replays/{replay_id}/events/{event_id}` | One detected event |
+| `GET /api/v1/replays/{replay_id}/timing` | Per-driver lap series for charts; `driver` (repeatable), `lap_from`, `lap_to` |
+| `GET /api/v1/replays/{replay_id}/drivers/{driver}/timing` | Lap series of one driver |
+
+Data management (operator endpoints, not needed by a viewer): `POST /api/v1/races/import`,
+`POST` / `GET /api/v1/sessions/{session_id}/timeline` and `GET .../timeline/summary`.
+
+### Timing series
+
+`GET .../timing` returns, per driver (ordered by abbreviation), the laps the replay has
+already released (`sequence <= replay.current_sequence`), so a chart never contains laps from
+the replay's future. Each point has `lap_number`, `race_time_ms`, `lap_time_ms`, `position`
+(lap-end classification as reported by the source), `gap_to_leader_ms`, tyre fields
+(`compound`, `tyre_age_laps`, `stint_number`), `is_pit_in_lap`, `is_pit_out_lap`,
+`is_deleted`, `track_status` and `sectors` (empty when the source has none; never invented).
+`gap_to_leader_ms` has the race state's definition: the driver's crossing time of the lap
+minus the earliest crossing of that lap by any driver. The last point of a driver therefore
+equals the `gap_to_leader_ms` in `GET .../state`. The series is derived from the persisted
+timeline, so unlike the state's bounded crossing window it covers every released lap. A replay
+that has not started returns every driver with an empty `points` list.
+
+### Error contract
+
+Every non-2xx response has the same body (also used by the WebSocket `ERROR` message):
+
+```json
+{"code": "REPLAY_NOT_FOUND", "message": "Replay 0b0f... not found", "details": null}
+```
+
+`code` is stable and machine-readable (branch on it, not on `message`); `details` is an
+object or `null`. Stack traces and database or Redis errors are never returned.
+
+| Status | Codes |
+|--------|-------|
+| 404 | `RACE_NOT_FOUND`, `SESSION_NOT_FOUND`, `DRIVER_NOT_FOUND`, `REPLAY_NOT_FOUND`, `RACE_STATE_UNAVAILABLE`, `DETECTED_EVENT_NOT_FOUND`, `TIMELINE_NOT_GENERATED`, `HISTORICAL_EVENT_NOT_FOUND`, `HISTORICAL_SESSION_NOT_FOUND`, `NOT_FOUND` (unknown path) |
+| 405 | `METHOD_NOT_ALLOWED` |
+| 409 | `INVALID_REPLAY_TRANSITION` (`details`: `command`, `current_status`), `REPLAY_NOT_STARTED`, `REPLAY_TIMELINE_UNAVAILABLE`, `TIMELINE_CONFLICT` |
+| 422 | `VALIDATION_ERROR` (`details.errors`: list of validation problems), `INVALID_PLAYBACK_SPEED`, `UNSUPPORTED_SESSION_TYPE`, `TIMELINE_BUILD_FAILED`, `TIMELINE_INVALID`, `HISTORICAL_DATA_INVALID` |
+| 500 | `INTERNAL_ERROR`, `IMPORT_PERSISTENCE_FAILED` |
+| 502 | `HISTORICAL_DATA_UNAVAILABLE` |
+| 503 | `DATABASE_UNAVAILABLE`, `REDIS_UNAVAILABLE`, `RACE_STATE_STORE_UNAVAILABLE` |
+
+Success codes: 200, and 201 for `POST /replays`, `POST /races/import` and a newly generated
+timeline. Replay commands that are not valid in the current status (for example `start` on a
+running replay, `pause` on a stopped one, `resume` on a completed one) are 409, never silently
+accepted.
+
+### Pagination and filters
+
+List endpoints that can be large take `limit` / `offset` and answer with
+`{"items": [...], "total", "limit", "offset"}` (laps: `limit` 1-500, default 100; detected events
+and timeline events: `limit` 1-1000). Drivers are filtered by abbreviation (case-insensitive) or
+UUID. `lap_from` / `lap_to` are inclusive, and `lap_from > lap_to` is a 422. Invalid values are a
+422 `VALIDATION_ERROR`.
+
+### CORS
+
+Browsers may call the API from the origins in `CORS_ALLOWED_ORIGINS` (comma-separated). The
+default allows local development servers only (`http://localhost:5173`,
+`http://127.0.0.1:5173`, `http://localhost:3000`); set the real frontend origin in every deployed
+environment. Allowed methods: `GET`, `POST`, `PATCH`, `OPTIONS`; credentials are not allowed.
+A disallowed origin receives no `Access-Control-Allow-Origin` header. There is no
+authentication; put the API behind a gateway if it must not be public.
+
+## WebSocket API
+
+`WS /api/v1/replays/{replay_id}/stream` pushes a replay's progress, race state changes and
+detected events to a browser. It is a delivery layer: it recomputes nothing. The race state
+comes from the Race State Engine, detections from the Detection Engine, lifecycle and clock from
+the replay service. Messages are JSON text frames.
+
+```js
+const ws = new WebSocket(`ws://127.0.0.1:8000/api/v1/replays/${replayId}/stream`);
+ws.onmessage = (e) => handle(JSON.parse(e.data));
+```
+
+### Envelope
+
+Every server message has the same envelope:
+
+| Field | Meaning |
+|-------|---------|
+| `type` | Message type (below) |
+| `schema_version` | Message contract version (currently `1`; breaking changes bump it) |
+| `replay_id` | The replay |
+| `run_id` | Replay run (changes on every start or restart); `null` for lifecycle messages |
+| `sequence` | Timeline sequence the message derives from; `null` for lifecycle messages |
+| `race_time_ms`, `lap_number` | Race clock position and leader lap of the message |
+| `emitted_at` | Server time the message was created (ISO 8601, UTC) |
+| `payload` | Type-specific object |
+
+### Message types
+
+| Type | Payload |
+|------|---------|
+| `SNAPSHOT` | `replay` (same as `GET /replays/{id}`), `state` (same as `GET /replays/{id}/state`, or `null`), `state_error` (REST error body explaining a `null` state, for example `REPLAY_NOT_STARTED`). Envelope `run_id` / `sequence` are the state's `run_id` / `last_sequence`. |
+| `PONG` | empty, answer to `PING` |
+| `ERROR` | `{code, message, details}`: the REST error body (plus `UNSUPPORTED_CLIENT_MESSAGE` and `CLIENT_TOO_SLOW`) |
+| `REPLAY_STATUS` | `replay`: the current replay status object. Sent after every lifecycle change (start, pause, resume, stop, restart, speed change, completion). |
+| `REPLAY_CLOCK` | `status`, `current_race_time_ms`, `current_lap`, `total_laps`, `playback_speed`, `emitted_event_count`, `total_events` |
+| `REPLAY_COMPLETED` | `replay`; sent right after the final `REPLAY_STATUS` |
+| `RACE_STATE_SNAPSHOT` | `reason` (`STATE_INITIALIZED`, `STATE_REBUILT`, `STATE_COMPLETED`), `state` (full state, as in REST). Sent when the state engine publishes a full state (start, rebuild, completion). |
+| `RACE_STATE_UPDATE` | `kinds`, `race` (changed race-level fields such as `current_lap`, `phase`, `leader_*`, `fastest_lap`, `track_status`), `last_sequence` |
+| `DRIVER_UPDATE` | `driver`: the driver's full current state as in REST, without `recent_laps` |
+| `LAP_COMPLETED` | `driver_id`, `abbreviation`, `lap` (a `recent_laps` entry), `laps_completed` |
+| `POSITION_CHANGED` | `driver_id`, `abbreviation`, `position`, `previous_position` |
+| `PIT_STATUS_CHANGED` | `driver_id`, `abbreviation`, `pit_status`, `pit_stop_count`, `last_pit_lane_duration_ms` |
+| `TRACK_STATUS_CHANGED` | `track_status` |
+| `DETECTED_EVENT` | `event`: identical to one item of `GET /replays/{id}/events` |
+
+### Initial snapshot and buffering
+
+On connect the server sends exactly one `SNAPSHOT` first, built by the same services as the
+REST endpoints (`state` equals `GET .../state`; before the replay is started `state` is `null`
+and `state_error.code` is `REPLAY_NOT_STARTED`). While the snapshot is being built the
+connection is registered and messages published in the meantime are buffered. After the
+snapshot is sent, buffered and live messages follow, except state messages (race state, driver,
+lap, position, pit and track status) of the same `run_id` with `sequence <= snapshot.sequence`,
+which the snapshot already contains. There is no gap and no double application. Messages of
+other runs, lifecycle messages and detections are never filtered.
+
+### Delta model
+
+After the snapshot a client keeps its state current by applying deltas:
+
+- `RACE_STATE_UPDATE.race`: shallow-merge into the race-level fields of the state.
+- `DRIVER_UPDATE.driver`: merge into the driver entry with the same `driver_id` (keep its own
+  `recent_laps`), then re-sort by `position`.
+- `LAP_COMPLETED.lap`: upsert into that driver's `recent_laps` by `lap_number`. Upsert rather than
+  append: the event that completes the race arrives both inside a `RACE_STATE_SNAPSHOT` and as
+  `LAP_COMPLETED`.
+- `RACE_STATE_SNAPSHOT.state`: replace the whole state.
+- `POSITION_CHANGED`, `PIT_STATUS_CHANGED` and `TRACK_STATUS_CHANGED` are notifications about changes
+  already contained in the updates (use them for animations, toasts or sound).
+
+### Ordering
+
+Within a run, `sequence` never decreases. One state event produces several messages that share its
+`sequence` in a fixed order: `RACE_STATE_SNAPSHOT` (full-state events only), `RACE_STATE_UPDATE`,
+`DRIVER_UPDATE` (one per changed driver), `LAP_COMPLETED`, `POSITION_CHANGED`, `PIT_STATUS_CHANGED`,
+`TRACK_STATUS_CHANGED`: state first, notifications after. A detection arrives after the state event
+that triggered it (the Detection Engine consumes the state stream) and carries that event's
+`sequence`. `REPLAY_STATUS`, `REPLAY_CLOCK` and `REPLAY_COMPLETED` are lifecycle messages from the replay service,
+not from the streams: they are **not ordered** relative to state or detection messages (a
+`REPLAY_COMPLETED` can arrive before the last state updates). Do not derive race state from them:
+treat the state as final on a `RACE_STATE_SNAPSHOT` with `reason` `STATE_COMPLETED` (state `phase`
+`COMPLETED`), not on `REPLAY_COMPLETED`. Run-scoped messages (all state messages and `DETECTED_EVENT`) are only delivered if their `run_id` is the
+replay's *current* run according to the replay service in the API process, checked when a message is queued for the client (and again when the snapshot is sent), so
+entries of an older run that the stream tail had not read yet (after a restart, at connect or resync) are
+dropped, and a new run is adopted however it is announced (`STATE_INITIALIZED`, `STATE_REBUILT` or a plain
+delta). If the replay has not run in this process (for example a state served from a PostgreSQL snapshot),
+the snapshot's own run is followed. No wall clocks are compared. A restart begins a new `run_id` from sequence 0: discard the state of an older run when you see a
+new `run_id` (send `RESYNC` to get a fresh snapshot).
+
+### Clock cadence
+
+`REPLAY_CLOCK` is sent once per `WS_CLOCK_INTERVAL_MS` (default 1000 ms) for every replay in
+`RUNNING` status that has subscribers. It is for smooth progress display and may be dropped for a slow
+client (see below). Paused, stopped and completed replays send no clock messages.
+
+### Completion
+
+When a replay completes the server sends `REPLAY_STATUS` (status `COMPLETED`) and `REPLAY_COMPLETED`;
+the socket stays open. The client can keep the connection, send `RESYNC`, or close it.
+
+### Client messages
+
+JSON text frames with a `type` (case-insensitive):
+
+- `{"type": "PING"}` is answered with `PONG` (application-level keep-alive).
+- `{"type": "RESYNC"}` is answered with a fresh `SNAPSHOT`, after which delivery resumes as after
+  connect (use it after detecting a gap or a `run_id` change).
+
+Anything else, including invalid JSON and binary frames, is answered with `ERROR` `UNSUPPORTED_CLIENT_MESSAGE`; the
+connection stays open. Replies to client messages are bounded (a flood of `PING`s is coalesced and
+excess replies are dropped).
+
+### Close codes
+
+| Code | Meaning |
+|------|---------|
+| 1008 | `replay_id` is not a UUID (rejected before the connection is accepted) |
+| 4404 | Unknown replay; an `ERROR` `REPLAY_NOT_FOUND` is sent first |
+| 4408 | Client too slow (send queue overflow or send timeout); an `ERROR` `CLIENT_TOO_SLOW` is sent first when possible |
+| 1013 | Try again later: the snapshot could not be built (for example the database is unavailable); an `ERROR` is sent first |
+| 1011 | Unexpected server error while building the snapshot; an `ERROR` `INTERNAL_ERROR` is sent first |
+| 1001 | Server shutting down |
+
+### Slow clients
+
+Each client has its own bounded queue (`WS_CLIENT_QUEUE_SIZE` messages) drained by its own task, so a
+slow client never delays the replay, the stream tail or other clients. When the queue is full,
+`REPLAY_CLOCK` messages are dropped (the next one supersedes them) and queued clock messages are evicted
+to make room for anything else. If a state, lifecycle or detection message still does not fit, the client
+is sent `ERROR` `CLIENT_TOO_SLOW` and disconnected with 4408 instead of silently missing a state
+transition. A single send that takes longer than `WS_SEND_TIMEOUT_SECONDS` also disconnects the client.
+Failing sockets are removed. Replays run the same with no clients, one client or many.
+
+### Reconnection strategy
+
+Do not try to resume from a message id. On any disconnect (including 4408 and 1013), reconnect with
+backoff and treat the new `SNAPSHOT` as authoritative: replace local state with it. Compare `run_id`
+and `sequence` with what you hold: the same `run_id` and a higher `sequence` means you missed updates,
+a different `run_id` means the replay was restarted. Messages published while disconnected are not
+replayed to the browser.
+
+### Scaling assumptions
+
+- Every API process runs one gateway that tails `race.state.events` and `race.detected.events` with a
+  plain `XREAD` from the stream tail at startup: broadcast, no consumer group, no acknowledgements. Every
+  process therefore sees every message and serves its own clients; this is separate from the consumer
+  groups of the Race State and Detection workers.
+- A replay runs in the process that created or started it. `REPLAY_STATUS`, `REPLAY_CLOCK` and
+  `REPLAY_COMPLETED` are produced from that process's in-memory replay state only, so WebSocket clients
+  must reach that same process: run a single API process (the replay service is single-process by
+  design). Stream-derived messages would work on any process.
+- Connection state is in memory; restarting the API drops connections and the replays running in it.
+
+### Frontend integration notes
+
+1. List races (`GET /races`), create a replay (`POST /replays`), open the WebSocket, then call `start`.
+   Opening the socket first lets you receive the very first state.
+2. Render from the `SNAPSHOT`, apply deltas as above, use `REPLAY_CLOCK` for the progress display.
+3. Fetch history with REST when needed (`/events` for the events list on load, `/timing` for charts);
+   `DETECTED_EVENT` items have the same shape, so one type serves both.
+4. Branch on `code`, not `message`. Ignore unknown message types and unknown fields: new types and
+   optional fields are non-breaking.
+5. Durations are milliseconds (`*_ms`); timestamps are ISO 8601; no response contains NaN or Infinity.
+
+### Known limitations
+
+- No authentication, authorization or rate limiting. CORS does not apply to WebSockets and the
+  WebSocket route does not check the `Origin` header, so any page can open a stream until auth exists.
+- No message replay after a reconnect; the snapshot is the recovery mechanism.
+- Lifecycle and clock messages require the single-process deployment described above.
+- Messages published while a gateway process was down or before it started are not delivered.
+- State and detection updates need the Race State and Detection workers to be running; without them the
+  socket still delivers lifecycle and clock messages.
 
 ## Tests
 
@@ -867,6 +1138,11 @@ FASTF1_RUN_EXTERNAL=1 uv run pytest -m external
 | `RACE_STATE_TTL_SECONDS` | no | TTL of the Redis state document, refreshed on every write (default `604800`) |
 | `RACE_STATE_GAP_WAIT_MS` | no | Max in-process wait for a missing predecessor before rebuilding from the timeline (default `1500`) |
 | `RACE_STATE_KEY_PREFIX` | no | Redis key prefix of the state document (default `race`) |
+| `CORS_ALLOWED_ORIGINS` | no | Comma-separated browser origins allowed by CORS (default: local dev servers `http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000`) |
+| `WS_CLIENT_QUEUE_SIZE` | no | Outgoing messages buffered per WebSocket client before it is disconnected as too slow (default `512`, min `8`) |
+| `WS_SEND_TIMEOUT_SECONDS` | no | A single WebSocket send slower than this disconnects the client (default `5`) |
+| `WS_CLOCK_INTERVAL_MS` | no | `REPLAY_CLOCK` interval for running replays (default `1000`, min `100`) |
+| `WS_STREAM_BLOCK_MS` | no | Blocking read timeout of the gateway's stream tail (default `1000`) |
 | `DETECTION_*` | no | Detection thresholds, see "Event detection > Configuration" |
 
 Copy `.env.example` for local values. Do not commit `.env`.

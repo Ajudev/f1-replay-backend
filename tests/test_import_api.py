@@ -129,7 +129,7 @@ async def test_import_returns_201_and_counts(
 ) -> None:
     client, _ = api_client
     response = await client.post(
-        "/races/import",
+        "/api/v1/races/import",
         json={"season": 2024, "round": 1, "session_type": "RACE"},
     )
     assert response.status_code == 201
@@ -147,11 +147,11 @@ async def test_second_import_returns_200_already_imported(
 ) -> None:
     client, loader = api_client
     first = await client.post(
-        "/races/import",
+        "/api/v1/races/import",
         json={"season": 2024, "round": 1},
     )
     second = await client.post(
-        "/races/import",
+        "/api/v1/races/import",
         json={"season": 2024, "round": 1},
     )
     assert first.status_code == 201
@@ -173,7 +173,7 @@ async def test_validation_422_when_both_round_and_event_name(
 ) -> None:
     client, _ = api_client
     response = await client.post(
-        "/races/import",
+        "/api/v1/races/import",
         json={"season": 2024, "round": 1, "event_name": "Bahrain"},
     )
     assert response.status_code == 422
@@ -181,9 +181,9 @@ async def test_validation_422_when_both_round_and_event_name(
 
 async def test_404_unknown_race(api_client: tuple[AsyncClient, FakeLoader]) -> None:
     client, _ = api_client
-    response = await client.get(f"/races/{uuid4()}")
+    response = await client.get(f"/api/v1/races/{uuid4()}")
     assert response.status_code == 404
-    assert "not found" in response.json()["detail"].lower()
+    assert "not found" in response.json()["message"].lower()
 
 
 async def test_get_session_returns_drivers_and_counts(
@@ -191,11 +191,11 @@ async def test_get_session_returns_drivers_and_counts(
 ) -> None:
     client, _ = api_client
     imported = await client.post(
-        "/races/import",
+        "/api/v1/races/import",
         json={"season": 2024, "round": 1},
     )
     session_id = imported.json()["session_id"]
-    response = await client.get(f"/sessions/{session_id}")
+    response = await client.get(f"/api/v1/sessions/{session_id}")
     assert response.status_code == 200
     body = response.json()
     assert len(body["drivers"]) == 1
@@ -214,11 +214,11 @@ async def test_session_load_error_returns_502_without_raw_exception(
     client, loader = api_client
     loader.fail_with = SessionLoadError("Failed to load session RACE for 2024 event 1")
     response = await client.post(
-        "/races/import",
+        "/api/v1/races/import",
         json={"season": 2024, "round": 1},
     )
     assert response.status_code == 502
-    detail = response.json()["detail"]
+    detail = response.json()["message"]
     assert detail == "Failed to load session RACE for 2024 event 1"
     assert "Traceback" not in response.text
     assert "fastf1" not in response.text.lower()
