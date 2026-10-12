@@ -737,6 +737,7 @@ history keyed by stint; a new stint empties it.
 | `PACE_DEGRADATION` | Same stint: `median(recent M clean laps) - median(baseline N clean laps before them) >= threshold` and at least M-1 recent laps slower than the baseline median. Once per stint, again only if the delta grew by a step. Severity by delta (1.0 s MEDIUM, 2.0 s HIGH). Evidence: medians, `delta_ms`, `slower_recent_laps`, windows, lap lists, `compound`, `tyre_age_laps`, `stint_number`. It states the slowdown, not its cause. |
 | `PACE_ANOMALY` | Clean lap, full baseline of K clean laps in the stint: score `(actual - expected) / (1.4826 * max(MAD, floor))` >= min score and deviation >= min ms (slow side only). Anomalous laps stay out of the baseline; a run of K anomalous laps becomes the new baseline; a run is reported once. Severity by deviation (4 s MEDIUM, 10 s HIGH). Evidence: `lap_time_ms`, `expected_ms`, `deviation_ms`, `robust_score`, `mad_ms`, `mad_floor_ms`, `baseline_laps`, tyre fields. Sector anomalies are not implemented: the race state has no sector data. |
 | `PERSONAL_BEST` | Eligible lap (time, not deleted, not lap 1, no pit lap, not neutralised) faster than the driver's best eligible lap; the first only sets the benchmark. An event needs an improvement of at least `DETECTION_PB_MIN_IMPROVEMENT_MS` over the *last reported* best (the true best is always tracked, so many tiny fuel-burn gains add up instead of emitting every lap). Evidence: `lap_time_ms`, `previous_best_ms` (last reported), `previous_true_best_ms`, `previous_best_lap`, `improvement_ms`, `min_improvement_ms`, tyre fields. Distinct from the race-wide fastest lap. |
+| `BATTLE_ENDED` | Closes every battle reported by `BATTLE_FORMING`, exactly once. Primary = attacker, secondary = defender. Evidence: `reason` (`GAP_RELEASED`: gap above the release gap; `OVERTAKE`: the attacker crossed the line ahead of the defender; `PIT`; `TRACK_STATUS`: lap not green; `PAIR_BROKEN`: another car in between, or the gap is unknown; `CONTACT_LOST`: the defender completed two more laps than the attacker's last observed lap; `RACE_FINISHED`: the attacker took the flag), `gap_ms`, `started_lap`, `ended_lap`, both positions. Ending a battle starts the pair's cooldown. |
 | `NEW_STINT` | On `PIT_EXIT`, or a higher stint number seen on `LAP_COMPLETED` when the pit data is missing; once per driver and stint. The starting stint is not "new". Evidence: `stint_number`, `compound` (`null` if unknown), `previous_stint_number`, `previous_compound`, `compound_changed`, `starting_lap`, `tyre_age_laps`, `pit_lane_duration_ms`, `pit_stop_count`, `source_event_type`. |
 
 Strategy detectors (for example `UNDERCUT_ATTEMPT`) are not implemented.
@@ -851,7 +852,10 @@ Race state, events and timing (scoped to a replay and to what it has released so
 | `GET /api/v1/replays/{replay_id}/drivers/{driver}/timing` | Lap series of one driver |
 
 Data management (operator endpoints, not needed by a viewer): `POST /api/v1/races/import`,
-`POST` / `GET /api/v1/sessions/{session_id}/timeline` and `GET .../timeline/summary`.
+`POST` / `GET /api/v1/sessions/{session_id}/timeline` and `GET .../timeline/summary`,
+`POST /api/v1/sessions/{session_id}/track-data` and `GET .../track-data/status`.
+
+Circuit map endpoints are listed in "Circuit map".
 
 ### Timing series
 
@@ -955,6 +959,7 @@ Every server message has the same envelope:
 | `PIT_STATUS_CHANGED` | `driver_id`, `abbreviation`, `pit_status`, `pit_stop_count`, `last_pit_lane_duration_ms` |
 | `TRACK_STATUS_CHANGED` | `track_status` |
 | `DETECTED_EVENT` | `event`: identical to one item of `GET /replays/{id}/events` |
+| `CAR_FRAME` | `race_time_ms`, `cars` (every car's position and telemetry, see "Circuit map"); droppable |
 
 ### Initial snapshot and buffering
 
@@ -1085,6 +1090,118 @@ replayed to the browser.
 - State and detection updates need the Race State and Detection workers to be running; without them the
   socket still delivers lifecycle and clock messages.
 
+## Circuit map
+
+Data for a 2D circuit map: the track outline, moving car markers with live telemetry,
+position labels and battle highlighting.
+
+### Two-step import
+
+Track data is a separate, optional import because FastF1 telemetry is far larger and
+slower to load than timing data:
+
+1. `POST /api/v1/races/import`, then `POST /api/v1/sessions/{session_id}/timeline`.
+2. `POST /api/v1/sessions/{session_id}/track-data` (201). It needs the timeline, because
+   samples are aligned to its race start. Running it again replaces the earlier import in
+   one transaction (`status: "replaced"`).
+
+`GET /api/v1/sessions/{session_id}/track-data/status` returns `NOT_IMPORTED` or
+`IMPORTED`, with sample counts and data-quality warnings. Errors: unknown session 404
+`SESSION_NOT_FOUND`; no timeline 404 `TIMELINE_NOT_GENERATED`; no position data in the
+historical source 422 `TRACK_DATA_UNAVAILABLE`.
+
+The import resamples positions (`pos_data`) and car telemetry (`car_data`) onto one
+race-time grid (`TRACK_POSITION_SAMPLE_MS`, default 500 ms). Each grid point takes the
+nearest raw sample within half an interval, separately for positions and telemetry.
+Nothing is interpolated, fabricated or clamped. A missing source is recorded as a warning.
+Out-of-range values (for example throttle 104) are stored as recorded and counted in a
+warning. Samples cover 60 s before the start to 60 s after each driver's last lap.
+Team colours (`team_color`, six hex digits without `#`) are taken from the results by
+both imports.
+
+### Circuit layout
+
+`GET /api/v1/sessions/{session_id}/circuit` (or `GET /api/v1/replays/{replay_id}/circuit`)
+returns `circuit_name`, `rotation_deg`, `bounds`, `outline` (`[[x, y], ...]` in driving
+order, at most 800 points from the fastest clean lap), `corners`
+(`number`, `letter`, `x`, `y`, `angle_deg`; `null` when unavailable), `sample_interval_ms`
+and `warnings`. Coordinates are raw FastF1 units (1/10 m), unrotated. Rotate by
+`rotation_deg` on the client to match official maps. `bounds` covers the outline and every
+stored car position. Before the track data import: 404 `TRACK_DATA_NOT_IMPORTED`.
+
+### Moving cars: `CAR_FRAME`
+
+Car positions are not replay events and never go through Redis Streams. The gateway loads
+a session's samples once (kept in memory for `POSITION_CACHE_SESSIONS` sessions). Every
+`WS_POSITION_INTERVAL_MS` (default 250 ms) it sends one `CAR_FRAME` per running replay at
+the live replay clock. The frame is computed once per replay and shared by its clients.
+A frame is also sent after the `SNAPSHOT` on connect or resync, and when the replay is
+paused, so a paused or not yet started map still shows the cars. `CAR_FRAME` is droppable:
+under backpressure the next frame supersedes it.
+
+```json
+{
+  "race_time_ms": 1834250,
+  "cars": [
+    {
+      "driver_id": "...", "x": 1234, "y": -567, "off_track": false,
+      "telemetry": {"speed_kph": 287, "rpm": 11250, "gear": 7, "throttle_pct": 100,
+                    "brake": false, "drs": "OPEN"}
+    },
+    {"driver_id": "...", "x": null, "y": null, "off_track": null, "telemetry": null}
+  ]
+}
+```
+
+- `x`/`y` are linearly interpolated between the stored samples around the replay clock.
+- `telemetry` is the latest stored sample at or before it. It is stepped, never
+  interpolated, so every value was actually recorded.
+- Position and telemetry are independently `null` when the nearest data is more than
+  `TRACK_POSITION_MAX_GAP_MS` away (missing data, retired car, before the start).
+- `drs`: `OFF` (codes 0, 1), `ELIGIBLE` (8: detected, flap closed), `OPEN` (10, 12, 14),
+  `UNKNOWN` (any other code).
+- Clients should interpolate `x`/`y` between frames for smooth movement. Use
+  `race_time_ms` and the replay's `playback_speed`.
+
+The `SNAPSHOT` payload carries `positions_available` and `telemetry_available`. When both
+are `false`, no `CAR_FRAME` will arrive for that replay.
+
+### Lap telemetry traces
+
+`GET /api/v1/replays/{replay_id}/drivers/{driver}/telemetry?lap=N` returns the stored
+samples of one lap: `race_time_ms`, `x`, `y`, `off_track`, `speed_kph`, `rpm`, `gear`,
+`throttle_pct`, `brake`, `drs`. `driver` is an abbreviation or UUID.
+
+The trace never reveals the replay's future. Only samples up to the replay clock are
+returned (`upto_race_time_ms`), and `complete` is `false` while the lap is being driven.
+A lap the replay has not reached is 409 `LAP_NOT_REACHED`. A lap without stored samples
+returns 200 with empty `samples` and a warning.
+
+### Position labels
+
+Labels come from the race state (`position`, `abbreviation`, `team_color` in
+`GET .../state`, `DRIVER_UPDATE` and `POSITION_CHANGED`). Positions are the official
+classification at each lap-end crossing, not the on-track order of the markers. Mid-lap,
+a marker can pass another before the labels change at the next crossing.
+
+### Battle highlighting
+
+A battle starts with `BATTLE_FORMING` (attacker = primary, defender = secondary) and ends
+with exactly one `BATTLE_ENDED` for the same pair. Both arrive as `DETECTED_EVENT`.
+`RAPIDLY_CLOSING` is an approach, not a battle. Battles in progress are listed by
+`GET /api/v1/replays/{replay_id}/battles` and in the `SNAPSHOT` payload's `battles`, so a
+client joining mid-race highlights the right pairs. Each item has `attacker_id`,
+`attacker_abbreviation`, `defender_id`, `defender_abbreviation`, `started_lap`,
+`last_gap_ms` and `last_observed_lap`. `battles` is `null` when Redis is unavailable. The
+list is read from the battle detector's memory, so it always matches the events.
+
+### Known limitations
+
+- Track data needs a separate import; existing sessions are not backfilled
+  automatically.
+- Telemetry-derived detections (DRS trains, lift and coast) are not implemented.
+- Positions are not used to reorder the field mid-lap.
+
 ## Tests
 
 Default suite (no FastF1 downloads):
@@ -1143,6 +1260,10 @@ FASTF1_RUN_EXTERNAL=1 uv run pytest -m external
 | `WS_SEND_TIMEOUT_SECONDS` | no | A single WebSocket send slower than this disconnects the client (default `5`) |
 | `WS_CLOCK_INTERVAL_MS` | no | `REPLAY_CLOCK` interval for running replays (default `1000`, min `100`) |
 | `WS_STREAM_BLOCK_MS` | no | Blocking read timeout of the gateway's stream tail (default `1000`) |
+| `WS_POSITION_INTERVAL_MS` | no | `CAR_FRAME` interval for running replays (default `250`, min `50`) |
+| `TRACK_POSITION_SAMPLE_MS` | no | Race-time grid of imported positions and telemetry (default `500`, min `100`) |
+| `TRACK_POSITION_MAX_GAP_MS` | no | Longest gap between samples a car is still shown across (default `3000`) |
+| `POSITION_CACHE_SESSIONS` | no | Sessions whose track data is kept in memory by the gateway (default `4`) |
 | `DETECTION_*` | no | Detection thresholds, see "Event detection > Configuration" |
 
 Copy `.env.example` for local values. Do not commit `.env`.

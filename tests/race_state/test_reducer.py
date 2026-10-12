@@ -449,3 +449,18 @@ def test_same_events_reduce_to_the_same_state() -> None:
 
     assert again.logical_dump() == sim.state.logical_dump()
     assert again.model_dump_json() == sim.state.model_dump_json()
+
+
+def test_team_colour_is_seeded_and_old_documents_still_load() -> None:
+    from app.race_state.models import RaceState
+
+    seed = make_seed()
+    seed = replace(seed, drivers=(replace(seed.drivers[0], team_color="3671c6"), *seed.drivers[1:]))
+    state = initial_state(seed, replay_id=REPLAY, run_id=RUN)
+    colours = {d.abbreviation: d.team_color for d in state.drivers.values()}
+    assert colours["VER"] == "3671c6" and colours["HAM"] is None
+
+    document = state.model_dump(mode="json")
+    for driver in document["drivers"].values():
+        del driver["team_color"]  # a state stored before team colours existed
+    assert all(d.team_color is None for d in RaceState.model_validate(document).drivers.values())

@@ -27,3 +27,7 @@ class NormalizationError(IngestionError):
 
 class PersistenceError(IngestionError):
     """Database persistence failed during import."""
+
+
+class TrackDataUnavailableError(IngestionError):
+    """The historical source has no usable car position data for the session."""

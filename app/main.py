@@ -15,9 +15,13 @@ from app.api.router import OPENAPI_TAGS, api_router
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.db.session import create_engine, create_session_factory
+from app.detection.battles import ActiveBattleService
+from app.detection.config import DetectionConfig
+from app.detection.store import DetectionContextStore
 from app.gateway.config import GatewayConfig
 from app.gateway.gateway import WebSocketGateway
 from app.infrastructure.redis import RedisClient
+from app.positions.cache import PositionTrackCache
 from app.race_state.config import RaceStateConfig
 from app.race_state.repository import RaceStateStore
 from app.race_state.service import RaceStateService
@@ -57,6 +61,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         session_factory,
         replay_service,
     )
+    # Car positions/telemetry are read from PostgreSQL once per session and kept in memory.
+    position_cache = PositionTrackCache(
+        session_factory,
+        max_gap_ms=settings.track_position_max_gap_ms,
+        max_sessions=settings.position_cache_sessions,
+    )
+    # Read side of the battle detector's memory (written by the detection worker).
+    battle_service = ActiveBattleService(
+        DetectionContextStore(
+            redis, stream_config=stream_config, config=DetectionConfig.from_settings(settings)
+        )
+    )
     # Delivery only: tails the state/detected streams and the replay lifecycle.
     ws_gateway = WebSocketGateway(
         redis=redis,
@@ -64,6 +80,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         replay_service=replay_service,
         race_state_service=race_state_service,
         config=GatewayConfig.from_settings(settings),
+        positions=position_cache,
+        battles=battle_service,
     )
 
     app.state.settings = settings
@@ -74,6 +92,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.race_state_service = race_state_service
     app.state.timing_service = ReplayTimingService(replay_service, session_factory)
     app.state.ws_gateway = ws_gateway
+    app.state.position_cache = position_cache
+    app.state.battle_service = battle_service
 
     logger.info(
         "Application starting name=%s env=%s",

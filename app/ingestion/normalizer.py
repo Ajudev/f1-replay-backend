@@ -82,6 +82,7 @@ def normalize(extracted: ExtractedSession) -> NormalizedSession:
                 grid_position=_positive_or_none(driver.grid_position),
                 finish_position=_positive_or_none(driver.finish_position),
                 result_status=driver.result_status,
+                team_color=driver.team_color,
             )
         )
         valid_abbreviations.add(abbr)

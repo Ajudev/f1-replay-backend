@@ -360,6 +360,7 @@ def _driver_summary(driver: Driver) -> DriverSummary:
         first_name=driver.first_name,
         last_name=driver.last_name,
         team_name=driver.team_name,
+        team_color=driver.team_color,
         grid_position=driver.grid_position,
         finish_position=driver.finish_position,
         result_status=driver.result_status,

@@ -16,6 +16,8 @@ class GatewayConfig:
     send_timeout_seconds: float = 5.0
     #: ``REPLAY_CLOCK`` cadence for running replays with subscribers.
     clock_interval_ms: int = 1000
+    #: ``CAR_FRAME`` cadence for running replays with subscribers and track data.
+    position_interval_ms: int = 250
     #: ``XREAD BLOCK`` timeout of the stream tail.
     stream_block_ms: int = 1000
     #: Max entries per stream per ``XREAD``.
@@ -29,5 +31,6 @@ class GatewayConfig:
             client_queue_size=settings.ws_client_queue_size,
             send_timeout_seconds=settings.ws_send_timeout_seconds,
             clock_interval_ms=settings.ws_clock_interval_ms,
+            position_interval_ms=settings.ws_position_interval_ms,
             stream_block_ms=settings.ws_stream_block_ms,
         )

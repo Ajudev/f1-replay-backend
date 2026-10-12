@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from app.detection.models import StatePayload
 from app.domain.enums import ReplayStatus
+from app.positions.track import CarFrame
 from app.race_state.models import DriverState, RaceState, StateEventType, StateSource
 from app.replay.state import ReplayState
 from app.schemas.detection import DetectedEventOut
@@ -37,6 +38,8 @@ class WsMessageType(StrEnum):
     REPLAY_STATUS = "REPLAY_STATUS"
     REPLAY_CLOCK = "REPLAY_CLOCK"
     REPLAY_COMPLETED = "REPLAY_COMPLETED"
+    # car positions and telemetry (from stored track data, sampled on the replay clock)
+    CAR_FRAME = "CAR_FRAME"
     # race state (from race.state.events)
     RACE_STATE_SNAPSHOT = "RACE_STATE_SNAPSHOT"
     RACE_STATE_UPDATE = "RACE_STATE_UPDATE"
@@ -50,7 +53,7 @@ class WsMessageType(StrEnum):
 
 
 #: Messages that may be dropped under backpressure (the next one supersedes them).
-DROPPABLE_TYPES = frozenset({WsMessageType.REPLAY_CLOCK})
+DROPPABLE_TYPES = frozenset({WsMessageType.REPLAY_CLOCK, WsMessageType.CAR_FRAME})
 
 #: Messages derived from race state events; a snapshot already covers those whose
 #: ``sequence`` is not newer than its ``last_sequence``.
@@ -144,6 +147,19 @@ def replay_clock_message(state: ReplayState) -> WsMessage:
     )
 
 
+def car_frame_message(
+    replay_id: UUID, race_time_ms: int, lap_number: int | None, cars: list[CarFrame]
+) -> WsMessage:
+    """Every car's position and telemetry at ``race_time_ms`` (one message per tick)."""
+    return WsMessage(
+        type=WsMessageType.CAR_FRAME,
+        replay_id=replay_id,
+        race_time_ms=race_time_ms,
+        lap_number=lap_number,
+        payload={"race_time_ms": race_time_ms, "cars": [car.to_payload() for car in cars]},
+    )
+
+
 # -- snapshot / control ------------------------------------------------------------------------
 
 
@@ -151,11 +167,17 @@ def snapshot_message(
     replay: ReplayResponse,
     state: RaceStateResponse | None,
     state_error: dict[str, Any] | None,
+    *,
+    battles: list[dict[str, Any]] | None = None,
+    positions_available: bool = False,
+    telemetry_available: bool = False,
 ) -> WsMessage:
     """Initial (or resync) snapshot: replay status plus the full race state if any.
 
     ``state_error`` explains a missing state using the REST error body, e.g.
-    ``REPLAY_NOT_STARTED`` or ``RACE_STATE_UNAVAILABLE``.
+    ``REPLAY_NOT_STARTED`` or ``RACE_STATE_UNAVAILABLE``. ``battles`` are the battles in
+    progress (``null`` when they could not be read); the two flags say whether
+    ``CAR_FRAME`` messages will carry positions / telemetry for this replay.
     """
     return WsMessage(
         type=WsMessageType.SNAPSHOT,
@@ -168,6 +190,9 @@ def snapshot_message(
             "replay": replay.model_dump(mode="json"),
             "state": state.model_dump(mode="json") if state else None,
             "state_error": state_error,
+            "battles": battles,
+            "positions_available": positions_available,
+            "telemetry_available": telemetry_available,
         },
     )
 

@@ -44,6 +44,7 @@ class RaceSeedLoader:
                         Driver.full_name,
                         Driver.team_name,
                         Driver.grid_position,
+                        Driver.team_color,
                     )
                     .where(Driver.session_id == session_id)
                     .order_by(Driver.abbreviation)

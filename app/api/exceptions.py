@@ -30,6 +30,7 @@ from app.ingestion.errors import (
     PersistenceError,
     SessionLoadError,
     SessionNotFoundError,
+    TrackDataUnavailableError,
 )
 from app.race_state.errors import (
     DriverNotInStateError,
@@ -50,6 +51,7 @@ from app.services.race_queries import (
     RaceSessionTypeNotFoundError,
 )
 from app.services.race_queries import SessionNotFoundError as QuerySessionNotFoundError
+from app.services.track import LapNotReachedError, TrackDataNotImportedError
 from app.timeline.errors import (
     TimelineBuildError,
     TimelineConflictError,
@@ -90,6 +92,7 @@ ERROR_MAP: dict[type[Exception], ErrorSpec] = {
     NormalizationError: ErrorSpec(422, "HISTORICAL_DATA_INVALID"),
     SessionLoadError: ErrorSpec(502, "HISTORICAL_DATA_UNAVAILABLE"),
     PersistenceError: ErrorSpec(500, "IMPORT_PERSISTENCE_FAILED"),
+    TrackDataUnavailableError: ErrorSpec(422, "TRACK_DATA_UNAVAILABLE"),
     # timeline
     TimelineNotGeneratedError: ErrorSpec(404, "TIMELINE_NOT_GENERATED"),
     TimelineConflictError: ErrorSpec(409, "TIMELINE_CONFLICT"),
@@ -113,6 +116,9 @@ ERROR_MAP: dict[type[Exception], ErrorSpec] = {
     RaceStateUnavailableError: ErrorSpec(404, "RACE_STATE_UNAVAILABLE"),
     DriverNotInStateError: ErrorSpec(404, "DRIVER_NOT_FOUND"),
     RaceStateStoreUnavailableError: ErrorSpec(503, "RACE_STATE_STORE_UNAVAILABLE"),
+    # track data (circuit map)
+    TrackDataNotImportedError: ErrorSpec(404, "TRACK_DATA_NOT_IMPORTED"),
+    LapNotReachedError: ErrorSpec(409, "LAP_NOT_REACHED"),
     # detected events
     DetectedEventNotFoundError: ErrorSpec(404, "DETECTED_EVENT_NOT_FOUND"),
 }

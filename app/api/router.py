@@ -12,6 +12,8 @@ from app.api.replays import router as replays_router
 from app.api.stream import router as stream_router
 from app.api.timeline import router as timeline_router
 from app.api.timing import router as timing_router
+from app.api.track import import_router as track_import_router
+from app.api.track import router as track_router
 
 API_V1_PREFIX = "/api/v1"
 
@@ -24,6 +26,8 @@ api_router.include_router(timing_router)
 api_router.include_router(stream_router)
 api_router.include_router(import_router)
 api_router.include_router(timeline_router)
+api_router.include_router(track_router)
+api_router.include_router(track_import_router)
 
 OPENAPI_TAGS = [
     {"name": "Races", "description": "Imported historical races, sessions, drivers and laps"},
@@ -31,6 +35,10 @@ OPENAPI_TAGS = [
     {"name": "Race State", "description": "Authoritative current race state of a replay"},
     {"name": "Events", "description": "Detected race events with structured evidence"},
     {"name": "Timing", "description": "Lap-by-lap data series for charts"},
+    {
+        "name": "Track",
+        "description": "Circuit map: layout, per-lap car telemetry and battles in progress",
+    },
     {"name": "Data Management", "description": "Operator endpoints: import and timeline build"},
     {"name": "Health", "description": "Liveness and readiness probes (unversioned)"},
 ]

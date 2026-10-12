@@ -3,6 +3,8 @@
 These types must not depend on FastAPI, SQLAlchemy, FastF1, or Redis.
 """
 
+from __future__ import annotations
+
 from enum import StrEnum
 
 
@@ -35,6 +37,7 @@ class DetectedEventType(StrEnum):
     PACE_ANOMALY = "PACE_ANOMALY"
     PERSONAL_BEST = "PERSONAL_BEST"
     NEW_STINT = "NEW_STINT"
+    BATTLE_ENDED = "BATTLE_ENDED"
 
 
 class Severity(StrEnum):
@@ -78,3 +81,25 @@ class TrackStatus(StrEnum):
     VIRTUAL_SAFETY_CAR_ENDING = "VIRTUAL_SAFETY_CAR_ENDING"
     RED_FLAG = "RED_FLAG"
     UNKNOWN = "UNKNOWN"
+
+
+class DrsState(StrEnum):
+    """DRS flap state derived from the raw FastF1 ``DRS`` channel code."""
+
+    OFF = "OFF"
+    ELIGIBLE = "ELIGIBLE"
+    OPEN = "OPEN"
+    UNKNOWN = "UNKNOWN"
+
+    @classmethod
+    def from_code(cls, code: int | None) -> DrsState | None:
+        """``0``/``1`` off, ``8`` eligible (detected, not open), ``10``/``12``/``14`` open."""
+        if code is None:
+            return None
+        if code in (0, 1):
+            return cls.OFF
+        if code == 8:
+            return cls.ELIGIBLE
+        if code in (10, 12, 14):
+            return cls.OPEN
+        return cls.UNKNOWN

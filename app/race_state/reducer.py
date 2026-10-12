@@ -95,6 +95,7 @@ def initial_state(
             driver_number=d.driver_number,
             full_name=d.full_name,
             team_name=d.team_name,
+            team_color=d.team_color,
             grid_position=d.grid_position,
             position=d.grid_position,
         )

@@ -16,16 +16,24 @@ from app.ingestion.cleaning import (
     clean_bool,
     clean_int,
     clean_optional_str,
+    clean_team_color,
+    is_missing,
     timedelta_to_ms,
     to_aware_datetime,
     to_date,
 )
 from app.ingestion.errors import EventNotFoundError, SessionLoadError, SessionNotFoundError
 from app.ingestion.records import (
+    CarSeries,
+    ExtractedCircuit,
+    ExtractedCorner,
     ExtractedDriver,
+    ExtractedDriverTrack,
     ExtractedLap,
     ExtractedSession,
+    ExtractedTrackData,
     ExtractedTrackStatus,
+    PositionSeries,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +78,19 @@ class SessionLoader(Protocol):
         ...
 
 
+class TrackDataLoader(Protocol):
+    """Protocol for loading a session's car positions, telemetry and circuit info."""
+
+    def load_track_data(
+        self,
+        season: int,
+        event: int | str,
+        session_type: SessionType,
+    ) -> ExtractedTrackData:
+        """Load and extract track data without returning FastF1 objects."""
+        ...
+
+
 def _row_get(row: Any, *keys: str) -> Any:
     """Read the first present key from a pandas Series-like or mapping."""
     for key in keys:
@@ -99,6 +120,35 @@ class FastF1SessionLoader:
         event: int | str,
         session_type: SessionType,
     ) -> ExtractedSession:
+        session = self._open_session(
+            season, event, session_type, telemetry=False, weather=False, messages=False
+        )
+        return self._extract(session, season=season, session_type=session_type)
+
+    def load_track_data(
+        self,
+        season: int,
+        event: int | str,
+        session_type: SessionType,
+    ) -> ExtractedTrackData:
+        """Car positions, car telemetry, team colours and circuit info of a session.
+
+        Loads telemetry, which is far larger and slower than the timing data.
+        """
+        session = self._open_session(
+            season, event, session_type, laps=True, telemetry=True, weather=False, messages=False
+        )
+        drivers = self._extract_driver_tracks(session)
+        return ExtractedTrackData(drivers=drivers, circuit=self._extract_circuit(session))
+
+    def _open_session(
+        self,
+        season: int,
+        event: int | str,
+        session_type: SessionType,
+        **load_options: bool,
+    ) -> Any:
+        """Resolve and load a FastF1 session, trying fallback identifiers if not found."""
         cache_path = Path(self._cache_dir)
         cache_path.mkdir(parents=True, exist_ok=True)
         fastf1.Cache.enable_cache(str(cache_path))
@@ -121,7 +171,7 @@ class FastF1SessionLoader:
                 raise mapped from None
 
             try:
-                session.load(telemetry=False, weather=False, messages=False)
+                session.load(**load_options)
             except Exception as exc:
                 mapped = self._map_load_error(exc, season, event, session_type)
                 if index < len(identifiers) - 1 and is_not_found_error(mapped):
@@ -133,7 +183,7 @@ class FastF1SessionLoader:
                     continue
                 raise mapped from None
 
-            return self._extract(session, season=season, session_type=session_type)
+            return session
 
         if last_not_found is not None:
             raise last_not_found
@@ -208,9 +258,60 @@ class FastF1SessionLoader:
                     grid_position=clean_int(_row_get(row, "GridPosition")),
                     finish_position=clean_int(_row_get(row, "Position")),
                     result_status=clean_optional_str(_row_get(row, "Status")),
+                    team_color=clean_team_color(_row_get(row, "TeamColor")),
                 )
             )
         return drivers
+
+    def _extract_driver_tracks(self, session: Any) -> list[ExtractedDriverTrack]:
+        """One entry per classified driver; ``pos_data``/``car_data`` are keyed by number."""
+        pos_data = _loaded_channel(session, "pos_data")
+        car_data = _loaded_channel(session, "car_data")
+        tracks: list[ExtractedDriverTrack] = []
+        for driver in self._extract_drivers(getattr(session, "results", None)):
+            key = str(driver.driver_number) if driver.driver_number is not None else None
+            tracks.append(
+                ExtractedDriverTrack(
+                    abbreviation=driver.abbreviation,
+                    driver_number=driver.driver_number,
+                    team_color=driver.team_color,
+                    positions=_position_series(pos_data.get(key)) if key else None,
+                    car=_car_series(car_data.get(key)) if key else None,
+                )
+            )
+        return tracks
+
+    def _extract_circuit(self, session: Any) -> ExtractedCircuit | None:
+        try:
+            info = session.get_circuit_info()
+        except Exception:
+            logger.warning("Circuit info unavailable; corners will not be imported", exc_info=True)
+            return None
+        if info is None:
+            return None
+        rotation = getattr(info, "rotation", None)
+        corners: list[ExtractedCorner] = []
+        table = getattr(info, "corners", None)
+        if table is not None:
+            for _, row in table.iterrows():
+                number = clean_int(_row_get(row, "Number"))
+                x, y = _row_get(row, "X"), _row_get(row, "Y")
+                if number is None or is_missing(x) or is_missing(y):
+                    continue
+                angle = _row_get(row, "Angle")
+                corners.append(
+                    ExtractedCorner(
+                        number=number,
+                        letter=clean_optional_str(_row_get(row, "Letter")) or "",
+                        x=float(x),
+                        y=float(y),
+                        angle_deg=None if is_missing(angle) else float(angle),
+                    )
+                )
+        return ExtractedCircuit(
+            rotation_deg=None if is_missing(rotation) else float(rotation),
+            corners=corners,
+        )
 
     def _extract_laps(self, laps: Any) -> list[ExtractedLap]:
         if laps is None:
@@ -324,6 +425,74 @@ class FastF1SessionLoader:
         return SessionLoadError(
             f"Failed to load session {session_type.value} for {season} event {event_label}"
         )
+
+
+def _loaded_channel(session: Any, name: str) -> dict[str, Any]:
+    """``pos_data`` / ``car_data`` by driver number; empty when FastF1 has none."""
+    try:
+        data = getattr(session, name)
+    except Exception:  # FastF1 raises DataNotLoadedError when the channel is unavailable
+        logger.warning("FastF1 %s unavailable for this session", name, exc_info=True)
+        return {}
+    return data if isinstance(data, dict) else dict(data or {})
+
+
+def _session_time_ms(frame: Any) -> Any:
+    return frame["SessionTime"].dt.total_seconds().mul(1000).round()
+
+
+def _position_series(frame: Any) -> PositionSeries | None:
+    """Rows with a session time and both coordinates, ordered by time."""
+    if frame is None or len(frame) == 0 or "SessionTime" not in frame:
+        return None
+    frame = frame.assign(_ms=_session_time_ms(frame)).dropna(subset=["_ms", "X", "Y"])
+    if len(frame) == 0:
+        return None
+    frame = frame.sort_values("_ms", kind="stable")
+    status = frame.get("Status")
+    return PositionSeries(
+        session_time_ms=frame["_ms"].astype("int64").tolist(),
+        x=frame["X"].round().astype("int64").tolist(),
+        y=frame["Y"].round().astype("int64").tolist(),
+        off_track=[None] * len(frame)
+        if status is None
+        else [_off_track(value) for value in status.tolist()],
+    )
+
+
+def _car_series(frame: Any) -> CarSeries | None:
+    if frame is None or len(frame) == 0 or "SessionTime" not in frame:
+        return None
+    frame = frame.assign(_ms=_session_time_ms(frame)).dropna(subset=["_ms"])
+    if len(frame) == 0:
+        return None
+    frame = frame.sort_values("_ms", kind="stable")
+
+    def ints(column: str) -> list[int | None]:
+        if column not in frame:
+            return [None] * len(frame)
+        return [clean_int(value) for value in frame[column].tolist()]
+
+    return CarSeries(
+        session_time_ms=frame["_ms"].astype("int64").tolist(),
+        speed_kph=ints("Speed"),
+        rpm=ints("RPM"),
+        gear=ints("nGear"),
+        throttle_pct=ints("Throttle"),
+        brake=[clean_bool(v) for v in frame["Brake"].tolist()]
+        if "Brake" in frame
+        else [None] * len(frame),
+        drs_code=ints("DRS"),
+    )
+
+
+def _off_track(status: Any) -> bool | None:
+    text = clean_optional_str(status)
+    if text == "OffTrack":
+        return True
+    if text == "OnTrack":
+        return False
+    return None
 
 
 # Type alias used only for internal annotation clarity above.

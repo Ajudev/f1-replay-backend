@@ -10,6 +10,11 @@ Connection flow: accept → register (pending, buffering) → build snapshot →
 then the buffered messages newer than it → live messages. Joining mid-race therefore
 starts from the current state with no gap.
 
+Car positions and telemetry (``CAR_FRAME``) are not replay events and never go
+through Redis Streams: they are sampled from the session's stored track data at the
+live replay clock, once per running replay per tick, and broadcast as droppable
+messages. A paused replay gets one frame when it pauses and on (re)connect.
+
 Replays never depend on browsers: no client, many clients or failing clients make no
 difference to the replay runner or to the stream consumers.
 """
@@ -24,8 +29,10 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import WebSocket, WebSocketDisconnect
+from redis.exceptions import RedisError
 
 from app.api.exceptions import error_body, resolve_error
+from app.detection.battles import ActiveBattleService
 from app.domain.enums import ReplayStatus
 from app.gateway.config import GatewayConfig
 from app.gateway.connections import (
@@ -38,6 +45,8 @@ from app.gateway.connections import (
 from app.gateway.fanout import StreamTail
 from app.gateway.messages import (
     UntranslatableEventError,
+    WsMessage,
+    car_frame_message,
     error_message,
     pong_message,
     replay_clock_message,
@@ -47,11 +56,15 @@ from app.gateway.messages import (
     translate_state_event,
 )
 from app.infrastructure.redis import RedisClient
+from app.positions.cache import PositionTrackCache
+from app.positions.track import PositionTrack
 from app.race_state.service import RaceStateService
 from app.replay.errors import ReplayNotFoundError
 from app.replay.service import ReplayService, ReplayView
+from app.replay.state import ReplayState
 from app.schemas.race_state import RaceStateResponse
 from app.schemas.replays import ReplayResponse
+from app.schemas.track import ActiveBattleOut
 from app.streaming.config import StreamConfig
 from app.streaming.envelope import StreamEvent
 
@@ -67,6 +80,8 @@ class WebSocketGateway:
         replay_service: ReplayService,
         race_state_service: RaceStateService,
         config: GatewayConfig,
+        positions: PositionTrackCache | None = None,
+        battles: ActiveBattleService | None = None,
     ) -> None:
         self.manager = ConnectionManager()
         self.config = config
@@ -79,6 +94,11 @@ class WebSocketGateway:
         # of replays no longer running in this process, e.g. just completed).
         self._statuses: dict[UUID, ReplayStatus] = {}
         self._clock_task: asyncio.Task[None] | None = None
+        self._positions = positions
+        self._battles = battles
+        self._position_task: asyncio.Task[None] | None = None
+        # Fire-and-forget frames (on pause); kept referenced until done.
+        self._frame_tasks: set[asyncio.Task[None]] = set()
 
     # -- lifecycle -------------------------------------------------------------------
 
@@ -88,13 +108,19 @@ class WebSocketGateway:
             self.tail.start()
         if clock:
             self._clock_task = asyncio.create_task(self._clock_loop(), name="ws-replay-clock")
+            if self._positions is not None:
+                self._position_task = asyncio.create_task(
+                    self._position_loop(), name="ws-car-frames"
+                )
 
     async def stop(self) -> None:
         self._replays.remove_listener(self.on_replay_change)
         await self.tail.stop()
-        if self._clock_task is not None:
-            self._clock_task.cancel()
-            await asyncio.gather(self._clock_task, return_exceptions=True)
+        tasks = [t for t in (self._clock_task, self._position_task) if t is not None]
+        tasks.extend(self._frame_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await self.manager.close_all()
 
     # -- inputs -----------------------------------------------------------------------
@@ -106,6 +132,10 @@ class WebSocketGateway:
             return
         self._statuses[replay_id] = view.state.status
         self.manager.broadcast(replay_id, replay_status_messages(ReplayResponse.from_view(view)))
+        if view.state.status is ReplayStatus.PAUSED and self._positions is not None:
+            task = asyncio.get_running_loop().create_task(self._broadcast_frame(view.state))
+            self._frame_tasks.add(task)
+            task.add_done_callback(self._frame_tasks.discard)
 
     async def on_stream_event(self, stream: str, event: StreamEvent) -> None:
         """Stream tail handler: translate and broadcast to the replay's subscribers."""
@@ -144,6 +174,46 @@ class WebSocketGateway:
                 self.tick()
             except Exception:
                 logger.exception("Replay clock tick failed")
+
+    async def position_tick(self) -> None:
+        """One ``CAR_FRAME`` per running replay with subscribers and track data."""
+        for replay_id in self.manager.replay_ids():
+            state = self._replays.live_state(replay_id)
+            if state is not None and state.status is ReplayStatus.RUNNING:
+                await self._broadcast_frame(state)
+
+    async def _broadcast_frame(self, state: ReplayState) -> None:
+        try:
+            message = await self._car_frame(state)
+        except Exception:
+            logger.exception("Car frame failed replay_id=%s", state.replay_id)
+            return
+        if message is not None:
+            self.manager.broadcast(state.replay_id, [message])
+
+    async def _car_frame(self, state: ReplayState) -> WsMessage | None:
+        track = await self._track(state.session_id)
+        if track is None:
+            return None
+        frames = track.frame_at(state.current_race_time_ms)
+        return car_frame_message(
+            state.replay_id, state.current_race_time_ms, state.current_lap, frames
+        )
+
+    async def _track(self, session_id: UUID) -> PositionTrack | None:
+        if self._positions is None:
+            return None
+        track = await self._positions.get(session_id)
+        return None if track is None or track.empty else track
+
+    async def _position_loop(self) -> None:
+        interval = self.config.position_interval_ms / 1000
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.position_tick()
+            except Exception:
+                logger.exception("Car frame tick failed")
 
     def _status_of(self, replay_id: UUID) -> ReplayStatus | None:
         live = self._replays.live_state(replay_id)
@@ -221,12 +291,50 @@ class WebSocketGateway:
                 )
                 return False
             state_error = resolved[1]
+        track = await self._safe_track(view.state.session_id)
         connection.activate(
-            snapshot_message(ReplayResponse.from_view(view), state, state_error),
+            snapshot_message(
+                ReplayResponse.from_view(view),
+                state,
+                state_error,
+                battles=await self._battle_list(replay_id),
+                positions_available=track is not None and track.positions_available,
+                telemetry_available=track is not None and track.telemetry_available,
+            ),
             run_id=state.run_id if state else None,
             after_sequence=state.last_sequence if state else None,
         )
+        if track is not None:
+            # Cars are visible right away, also when the replay is paused or not started.
+            connection.offer(
+                car_frame_message(
+                    replay_id,
+                    view.state.current_race_time_ms,
+                    view.state.current_lap,
+                    track.frame_at(view.state.current_race_time_ms),
+                )
+            )
         return True
+
+    async def _safe_track(self, session_id: UUID) -> PositionTrack | None:
+        """Track data for a snapshot; a failure only costs the frames, never the client."""
+        try:
+            return await self._track(session_id)
+        except Exception:
+            logger.exception("Track data unavailable for snapshot session_id=%s", session_id)
+            return None
+
+    async def _battle_list(self, replay_id: UUID) -> list[dict[str, Any]] | None:
+        if self._battles is None:
+            return None
+        try:
+            _, battles = await self._battles.list(
+                replay_id, self._replays.current_run_id(replay_id)
+            )
+        except RedisError:
+            logger.warning("Active battles unavailable for snapshot replay_id=%s", replay_id)
+            return None
+        return [ActiveBattleOut.build(b).model_dump(mode="json") for b in battles]
 
     async def _receive_loop(self, websocket: WebSocket, connection: ClientConnection) -> None:
         """Client → server control messages: ``PING`` and ``RESYNC``."""

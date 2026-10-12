@@ -5,6 +5,7 @@ pandas may be imported in this module only within the ingestion package.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -31,6 +32,18 @@ def clean_optional_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text if text else None
+
+
+_HEX_COLOR = re.compile(r"[0-9a-fA-F]{6}")
+
+
+def clean_team_color(value: Any) -> str | None:
+    """Six hex digits without ``#`` (lowercase), or None when missing or malformed."""
+    text = clean_optional_str(value)
+    if text is None:
+        return None
+    text = text.removeprefix("#")
+    return text.lower() if _HEX_COLOR.fullmatch(text) else None
 
 
 def clean_bool(value: Any) -> bool | None:

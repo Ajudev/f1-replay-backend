@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 
+from app.detection.battles import active_battles
 from app.detection.config import BattleConfig, DetectionConfig
 from app.domain.enums import DetectedEventType, TrackStatus
-from tests.detection.builders import LAP_MS, Entry, Scenario, driver_id
+from tests.detection.builders import LAP_MS, Entry, Scenario, driver_id, logical
 
 BATTLE = DetectedEventType.BATTLE_FORMING
 RAPID = DetectedEventType.RAPIDLY_CLOSING
@@ -205,3 +206,124 @@ def test_attackers_are_tracked_independently() -> None:
     }
     assert pairs == {("BBB", "AAA"), ("DDD", "CCC")}
     assert {e.primary_driver_id for e in scenario.detected} == {driver_id("BBB"), driver_id("DDD")}
+
+
+# -- BATTLE_ENDED and active battles ---------------------------------------------------------
+
+ENDED = DetectedEventType.BATTLE_ENDED
+FORMING = [3200, 2400, 1500, 800]  # battle forms on lap 5
+
+
+def ended(scenario: Scenario) -> list[tuple[int | None, str, str | None, str | None]]:
+    return [
+        (
+            e.lap_number,
+            e.evidence["reason"],
+            e.primary_driver_abbreviation,
+            e.secondary_driver_abbreviation,
+        )
+        for e in scenario.of_type(ENDED)
+    ]
+
+
+def test_a_released_gap_ends_the_battle_once() -> None:
+    scenario = chase([*FORMING, 1200, 2000, 2600, 3000])
+    assert ended(scenario) == [(7, "GAP_RELEASED", "BBB", "AAA")]
+    [event] = scenario.of_type(ENDED)
+    assert event.evidence["started_lap"] == 5
+    assert event.evidence["ended_lap"] == 7
+    assert event.evidence["gap_ms"] == 2000
+
+
+def test_an_overtake_ends_the_battle() -> None:
+    scenario = chase(FORMING)
+    scenario.round(6, [Entry("BBB", 0), Entry("AAA", 300)])
+    assert ended(scenario) == [(6, "OVERTAKE", "BBB", "AAA")]
+
+
+def test_a_pit_stop_ends_the_battle() -> None:
+    scenario = chase(FORMING)
+    scenario.round(6, [Entry("AAA", 0), Entry("BBB", 700, pit_in=True)])
+    assert ended(scenario) == [(6, "PIT", "BBB", "AAA")]
+
+
+def test_a_neutralised_lap_ends_the_battle() -> None:
+    scenario = chase(FORMING)
+    scenario.track(TrackStatus.SAFETY_CAR, 6 * LAP_MS - 50_000)
+    scenario.round(
+        6, [Entry("AAA", 0, status="SAFETY_CAR"), Entry("BBB", 700, status="SAFETY_CAR")]
+    )
+    assert ended(scenario) == [(6, "TRACK_STATUS", "BBB", "AAA")]
+
+
+def test_a_car_in_between_breaks_the_pair() -> None:
+    scenario = chase(FORMING, scenario=Scenario(["AAA", "BBB", "CCC"], detectors=["battle"]))
+    scenario.round(6, [Entry("AAA", 0), Entry("CCC", 100), Entry("BBB", 600)])
+    assert ended(scenario) == [(6, "PAIR_BROKEN", "BBB", "AAA")]
+
+
+def test_an_attacker_that_stops_loses_contact() -> None:
+    scenario = chase(FORMING)
+    scenario.round(6, [Entry("AAA", 0)])
+    assert ended(scenario) == []
+    scenario.round(7, [Entry("AAA", 0)])
+    assert ended(scenario) == [(7, "CONTACT_LOST", "BBB", "AAA")]
+
+
+def test_the_chequered_flag_ends_the_battle() -> None:
+    scenario = chase([*FORMING, 700], first_lap=56)  # 60 laps: forms on 59, flag on 60
+    assert [e.lap_number for e in scenario.of_type(BATTLE)] == [59]
+    assert ended(scenario) == [(60, "RACE_FINISHED", "BBB", "AAA")]
+
+
+def test_no_battle_ended_without_a_battle() -> None:
+    scenario = chase([3200, 2400, 2600])
+    scenario.round(5, [Entry("AAA", 0), Entry("BBB", 700, pit_in=True)])
+    assert scenario.of_type(ENDED) == []
+
+
+def test_the_cooldown_still_starts_when_the_battle_ends() -> None:
+    gaps = [*FORMING, 2000, 2600, 1900, 1100, 600]
+    scenario = chase(gaps)
+    assert [e.lap_number for e in scenario.of_type(BATTLE)] == [5, 10]
+    assert [lap for lap, *_ in ended(scenario)] == [6]
+
+
+def test_battle_events_are_deterministic() -> None:
+    gaps = [*FORMING, 1200, 2000, 2800, 1900, 1100, 600]
+    assert logical(chase(gaps).detected) == logical(chase(gaps).detected)
+
+
+def test_active_battles_follow_the_battle_lifecycle() -> None:
+    scenario = chase(FORMING)
+    assert scenario.context is not None
+    [battle] = active_battles(scenario.context)
+    assert (battle.attacker_abbreviation, battle.defender_abbreviation) == ("BBB", "AAA")
+    assert (battle.attacker_id, battle.defender_id) == (driver_id("BBB"), driver_id("AAA"))
+    assert (battle.started_lap, battle.last_gap_ms, battle.last_observed_lap) == (5, 800, 5)
+
+    scenario.round(6, [Entry("AAA", 0), Entry("BBB", 2000)])
+    assert active_battles(scenario.context) == []
+
+
+async def test_active_battle_service_scopes_to_the_run() -> None:
+    from uuid import uuid4
+
+    from app.detection.battles import ActiveBattleService
+
+    scenario = chase(FORMING)
+    context = scenario.context
+    assert context is not None
+
+    class Store:
+        async def get(self, _replay_id: object) -> object:
+            return context
+
+    service = ActiveBattleService(Store())  # type: ignore[arg-type]
+    run, battles = await service.list(scenario.replay_id, scenario.run_id)
+    assert (run, len(battles)) == (scenario.run_id, 1)
+    # Not run in this process (e.g. after a restart): the stored run is used.
+    run, battles = await service.list(scenario.replay_id, None)
+    assert (run, len(battles)) == (scenario.run_id, 1)
+    other = uuid4()
+    assert await service.list(scenario.replay_id, other) == (other, [])

@@ -283,3 +283,10 @@ def test_duplicate_abbreviation_raises_normalization_error() -> None:
 def test_lap_end_time_is_carried_through_normalization() -> None:
     result = normalize(_base_session(drivers=[_driver()], laps=[_lap()]))
     assert result.laps[0].lap_end_time_ms == 67_000
+
+
+def test_team_colour_is_carried_to_the_normalized_driver() -> None:
+    from dataclasses import replace
+
+    session = _base_session(drivers=[replace(_driver("NOR"), team_color="ff8000")], laps=[])
+    assert [d.team_color for d in normalize(session).drivers] == ["ff8000"]

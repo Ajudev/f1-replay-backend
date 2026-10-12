@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     ws_send_timeout_seconds: float = Field(default=5.0, gt=0, alias="WS_SEND_TIMEOUT_SECONDS")
     ws_clock_interval_ms: int = Field(default=1000, ge=100, alias="WS_CLOCK_INTERVAL_MS")
     ws_stream_block_ms: int = Field(default=1000, ge=10, alias="WS_STREAM_BLOCK_MS")
+    ws_position_interval_ms: int = Field(default=250, ge=50, alias="WS_POSITION_INTERVAL_MS")
+
+    # Track data: circuit layout, car positions and telemetry (see app/positions/).
+    track_position_sample_ms: int = Field(default=500, ge=100, alias="TRACK_POSITION_SAMPLE_MS")
+    track_position_max_gap_ms: int = Field(default=3_000, ge=100, alias="TRACK_POSITION_MAX_GAP_MS")
+    position_cache_sessions: int = Field(default=4, ge=1, alias="POSITION_CACHE_SESSIONS")
 
     # Redis Streams transport (see app/streaming/config.py for how these are used).
     stream_raw_events: str = Field(default="race.raw.events", alias="STREAM_RAW_EVENTS")

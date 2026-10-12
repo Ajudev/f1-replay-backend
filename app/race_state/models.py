@@ -116,6 +116,8 @@ class DriverState(BaseModel):
     driver_number: int | None = None
     full_name: str | None = None
     team_name: str | None = None
+    #: Six hex digits without ``#``; ``null`` when the historical data has none.
+    team_color: str | None = None
     grid_position: int | None = None
 
     position: int | None = None
@@ -249,6 +251,7 @@ class SeedDriver:
     full_name: str | None = None
     team_name: str | None = None
     grid_position: int | None = None
+    team_color: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

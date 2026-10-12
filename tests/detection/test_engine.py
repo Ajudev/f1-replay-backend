@@ -158,7 +158,7 @@ def test_a_detected_event_carries_the_full_contract() -> None:
         source_state_event.payload["source_event_id"]
     ]
     assert event.source_sequence == source_state_event.sequence
-    assert (event.detector_name, event.detector_version) == ("battle", 1)
+    assert (event.detector_name, event.detector_version) == ("battle", 2)
     assert event.detected_at == BASE_TIME
     assert event.severity is None and event.confidence is None
 

@@ -21,14 +21,23 @@ pair is already in a battle.
 
 Suppression: after ``BATTLE_FORMING`` the pair is *active* and nothing more is reported
 for it until the gap exceeds ``release_gap_ms`` (hysteresis) or the pair is broken, and
-then ``cooldown_laps`` laps must pass. ``RAPIDLY_CLOSING`` is reported once per approach
+then ``cooldown_laps`` laps must pass.
+
+``BATTLE_ENDED`` closes every active battle exactly once, with a ``reason``:
+``GAP_RELEASED`` (gap above ``release_gap_ms``), ``OVERTAKE`` (the attacker is now ahead
+of the defender), ``PIT``, ``TRACK_STATUS`` (lap not green), ``PAIR_BROKEN`` (another car
+in between, gap unknown or inconsistent), ``CONTACT_LOST`` (the defender completed two
+more laps than the attacker's last observed lap, e.g. the attacker stopped) or
+``RACE_FINISHED`` (the attacker took the flag). ``RAPIDLY_CLOSING`` is reported once per approach
 (re-armed when the gap leaves the zone or stops closing) and also respects the cooldown.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -38,7 +47,7 @@ from app.detection.models import DetectionDraft, DetectorInput, DriverRef
 from app.detection.pace import lap_window_condition
 from app.detection.track_status import WindowCondition
 from app.domain.enums import DetectedEventType, EventType
-from app.race_state.models import DriverState, GapBasis, LapRecord, PitStatus
+from app.race_state.models import DriverRaceStatus, DriverState, GapBasis, LapRecord, PitStatus
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +61,8 @@ class AttackerTrack(BaseModel):
     defender_id: str | None = None
     observations: list[GapObservation] = Field(default_factory=list)
     battle_active: bool = False
+    #: Lap the active battle was reported (``BATTLE_FORMING``).
+    battle_started_lap: int | None = None
     approach_reported: bool = False
     #: Per defender: lap a battle with them ended / ``RAPIDLY_CLOSING`` was last reported.
     battle_ended: dict[str, int] = Field(default_factory=dict)
@@ -62,6 +73,17 @@ class BattleMemory(BaseModel):
     attackers: dict[str, AttackerTrack] = Field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class EndedBattle:
+    defender_id: str
+    started_lap: int | None
+    gap_ms: int | None
+
+
+#: ``_defender`` / ``_break`` reasons → public ``BATTLE_ENDED`` reasons.
+_END_REASONS = {"pit_lap": "PIT", "in_pit": "PIT", "track_status": "TRACK_STATUS"}
+
+
 def _bounded(entries: dict[str, int], limit: int) -> None:
     while len(entries) > limit:
         del entries[min(entries, key=lambda k: entries[k])]
@@ -69,7 +91,7 @@ def _bounded(entries: dict[str, int], limit: int) -> None:
 
 class BattleDetector(Detector[BattleMemory]):
     name = "battle"
-    version = 1
+    version = 2
     triggers = frozenset({EventType.LAP_COMPLETED.value})
     memory_model = BattleMemory
 
@@ -82,21 +104,58 @@ class BattleDetector(Detector[BattleMemory]):
         attacker, record = found
         cfg = data.config.battle
         memory = memory.model_copy(deep=True)
-        track = memory.attackers.setdefault(str(attacker.driver_id), AttackerTrack())
         lap = record.lap_number
+        drafts = self._lost_contact(data, memory, attacker, lap, cfg)
+        track = memory.attackers.setdefault(str(attacker.driver_id), AttackerTrack())
+        drafts.extend(self._evaluate_pair(data, track, attacker, record, cfg))
+        if attacker.race_status is DriverRaceStatus.FINISHED and track.battle_active:
+            drafts.append(
+                self._ended(data, attacker, self._break(track, lap, cfg), lap, "RACE_FINISHED")
+            )
+        return drafts, memory
 
+    def _evaluate_pair(
+        self,
+        data: DetectorInput,
+        track: AttackerTrack,
+        attacker: DriverState,
+        record: LapRecord,
+        cfg: BattleConfig,
+    ) -> list[DetectionDraft]:
+        lap = record.lap_number
+        drafts: list[DetectionDraft] = []
         defender_and_record, reason = self._defender(data, attacker, record)
         if defender_and_record is None:
-            self._break(track, lap, cfg, reason)
-            return [], memory
+            ended = self._break(track, lap, cfg)
+            if ended is not None:
+                drafts.append(
+                    self._ended(
+                        data,
+                        attacker,
+                        ended,
+                        lap,
+                        self._end_reason(data, attacker, ended, reason, lap),
+                    )
+                )
+            return drafts
         defender, defender_record = defender_and_record
         defender_key = str(defender.driver_id)
 
         if track.defender_id != defender_key:
-            self._break(track, lap, cfg, "defender_changed")
+            ended = self._break(track, lap, cfg)
+            if ended is not None:
+                drafts.append(
+                    self._ended(
+                        data,
+                        attacker,
+                        ended,
+                        lap,
+                        self._end_reason(data, attacker, ended, "defender_changed", lap),
+                    )
+                )
             track.defender_id = defender_key
         if track.observations and lap <= track.observations[-1].lap:
-            return [], memory  # already observed
+            return drafts  # already observed
         if track.observations and lap != track.observations[-1].lap + 1:
             track.observations = []  # a lap is missing: not consecutive
             track.approach_reported = False
@@ -104,8 +163,37 @@ class BattleDetector(Detector[BattleMemory]):
         track.observations.append(GapObservation(lap=lap, gap_ms=attacker.interval_to_ahead_ms))
         del track.observations[: -cfg.window_laps]
 
+        if track.battle_active and track.observations[-1].gap_ms > cfg.release_gap_ms:
+            ended = self._end(track, lap, cfg)
+            drafts.append(self._ended(data, attacker, ended, lap, "GAP_RELEASED"))
         draft = self._assess(track, cfg, attacker, defender, record, defender_record)
-        return ([draft] if draft else []), memory
+        if draft is not None:
+            drafts.append(draft)
+        return drafts
+
+    def _lost_contact(
+        self,
+        data: DetectorInput,
+        memory: BattleMemory,
+        defender: DriverState,
+        lap: int,
+        cfg: BattleConfig,
+    ) -> list[DetectionDraft]:
+        """End battles whose attacker fell out of contact with this (defending) driver."""
+        drafts: list[DetectionDraft] = []
+        defender_key = str(defender.driver_id)
+        for attacker_key in sorted(memory.attackers):
+            track = memory.attackers[attacker_key]
+            if not (track.battle_active and track.defender_id == defender_key):
+                continue
+            last = track.observations[-1].lap if track.observations else None
+            attacker = data.current.drivers.get(UUID(attacker_key))
+            if attacker is None or (last is not None and lap < last + 2):
+                continue
+            drafts.append(
+                self._ended(data, attacker, self._break(track, lap, cfg), lap, "CONTACT_LOST")
+            )
+        return drafts
 
     # -- pair validity ---------------------------------------------------------------------
 
@@ -137,17 +225,80 @@ class BattleDetector(Detector[BattleMemory]):
                 return None, "track_status"
         return (defender, defender_record), ""
 
-    @staticmethod
-    def _break(track: AttackerTrack, lap: int, cfg: BattleConfig, reason: str) -> None:
+    @classmethod
+    def _break(cls, track: AttackerTrack, lap: int, cfg: BattleConfig) -> EndedBattle | None:
         """The pair stopped being comparable: restart the window, end an active battle."""
-        if track.battle_active and track.defender_id is not None:
-            track.battle_ended[track.defender_id] = lap
-            _bounded(track.battle_ended, cfg.memory_pairs)
-            logger.debug("Battle ended lap=%d reason=%s", lap, reason)
-        track.battle_active = False
+        ended = cls._end(track, lap, cfg) if track.battle_active else None
         track.approach_reported = False
         track.observations = []
         track.defender_id = None
+        return ended
+
+    @staticmethod
+    def _end(track: AttackerTrack, lap: int, cfg: BattleConfig) -> EndedBattle:
+        """End the active battle (starts the pair's cooldown)."""
+        assert track.defender_id is not None
+        ended = EndedBattle(
+            defender_id=track.defender_id,
+            started_lap=track.battle_started_lap,
+            gap_ms=track.observations[-1].gap_ms if track.observations else None,
+        )
+        track.battle_ended[track.defender_id] = lap
+        _bounded(track.battle_ended, cfg.memory_pairs)
+        track.battle_active = False
+        track.battle_started_lap = None
+        return ended
+
+    @staticmethod
+    def _end_reason(
+        data: DetectorInput, attacker: DriverState, ended: EndedBattle, reason: str, lap: int
+    ) -> str:
+        """``OVERTAKE`` when the attacker crossed the line of ``lap`` ahead of the defender
+        (a defender stopping on track before the line reads the same; lap-end data cannot
+        tell them apart)."""
+        if reason in _END_REASONS:
+            return _END_REASONS[reason]
+        defender = data.current.drivers.get(UUID(ended.defender_id))
+        record = data.lap_record(attacker, lap)
+        if defender is None or record is None:
+            return "PAIR_BROKEN"
+        defender_record = data.lap_record(defender, lap)
+        if defender_record is None:
+            ahead = defender.laps_completed < lap
+        else:
+            ahead = (
+                record.position is not None
+                and defender_record.position is not None
+                and record.position < defender_record.position
+            )
+        return "OVERTAKE" if ahead else "PAIR_BROKEN"
+
+    @staticmethod
+    def _ended(
+        data: DetectorInput,
+        attacker: DriverState,
+        ended: EndedBattle | None,
+        lap: int,
+        reason: str,
+    ) -> DetectionDraft:
+        assert ended is not None
+        defender = data.current.drivers.get(UUID(ended.defender_id))
+        logger.debug("Battle ended lap=%d reason=%s", lap, reason)
+        return DetectionDraft(
+            event_type=DetectedEventType.BATTLE_ENDED,
+            primary=DriverRef.of(attacker),
+            secondary=DriverRef.of(defender) if defender is not None else None,
+            lap_number=lap,
+            key=f"lap:{lap}",
+            evidence={
+                "reason": reason,
+                "gap_ms": ended.gap_ms,
+                "started_lap": ended.started_lap,
+                "ended_lap": lap,
+                "attacker_position": attacker.position,
+                "defender_position": defender.position if defender is not None else None,
+            },
+        )
 
     # -- trend ----------------------------------------------------------------------------
 
@@ -165,10 +316,6 @@ class BattleDetector(Detector[BattleMemory]):
         gaps = [o.gap_ms for o in track.observations]
         gap_now = gaps[-1]
 
-        if track.battle_active and gap_now > cfg.release_gap_ms:
-            track.battle_active = False
-            track.battle_ended[track.defender_id] = lap
-            _bounded(track.battle_ended, cfg.memory_pairs)
         if gap_now > cfg.rapid_max_gap_ms:
             track.approach_reported = False
         if len(gaps) < cfg.window_laps:
@@ -191,6 +338,7 @@ class BattleDetector(Detector[BattleMemory]):
 
         if gap_now <= cfg.gap_ms and rate >= cfg.min_closing_rate_ms:
             track.battle_active = True
+            track.battle_started_lap = lap
             track.approach_reported = True
             track.rapid_reported[track.defender_id] = lap
             _bounded(track.rapid_reported, cfg.memory_pairs)

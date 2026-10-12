@@ -350,3 +350,18 @@ def test_state_derived_types_are_exactly_the_state_messages() -> None:
     assert WsMessageType.SNAPSHOT not in STATE_DERIVED_TYPES
     assert WsMessageType.DETECTED_EVENT not in STATE_DERIVED_TYPES
     assert WsMessageType.DRIVER_UPDATE in STATE_DERIVED_TYPES
+
+
+def test_car_frame_is_droppable_and_carries_every_car() -> None:
+    from app.gateway.messages import WsMessageType, car_frame_message
+    from app.positions.track import CarFrame
+
+    replay_id, driver = uuid4(), uuid4()
+    message = car_frame_message(replay_id, 1234, 2, [CarFrame(driver, 1, 2, False, None)])
+    assert message.type is WsMessageType.CAR_FRAME
+    assert message.droppable
+    assert (message.race_time_ms, message.lap_number, message.run_id) == (1234, 2, None)
+    assert message.payload == {
+        "race_time_ms": 1234,
+        "cars": [{"driver_id": str(driver), "x": 1, "y": 2, "off_track": False, "telemetry": None}],
+    }

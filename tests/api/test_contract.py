@@ -67,6 +67,7 @@ DRIVER_FIELDS = {
     "driver_number",
     "full_name",
     "team_name",
+    "team_color",
     "grid_position",
     "position",
     "previous_position",
@@ -335,7 +336,14 @@ async def test_snapshot_state_matches_the_rest_contract(api_env: ApiEnv) -> None
     ws = await api_env.ws(replay_id)
     snapshot = await ws.receive()
 
-    assert set(snapshot["payload"]) == {"replay", "state", "state_error"}
+    assert set(snapshot["payload"]) == {
+        "replay",
+        "state",
+        "state_error",
+        "battles",
+        "positions_available",
+        "telemetry_available",
+    }
     assert set(snapshot["payload"]["replay"]) == set(REPLAY_FIELDS)
     assert set(snapshot["payload"]["state"]) == STATE_FIELDS
 

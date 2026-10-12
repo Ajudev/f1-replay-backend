@@ -150,6 +150,7 @@ class ImportRepository:
                 grid_position=item.grid_position,
                 finish_position=item.finish_position,
                 result_status=item.result_status,
+                team_color=item.team_color,
             )
             for item in normalized.drivers
         ]

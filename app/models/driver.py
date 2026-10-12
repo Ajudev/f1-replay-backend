@@ -65,6 +65,8 @@ class Driver(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     grid_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
     finish_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
     result_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Team colour as six hex digits without ``#`` (from the historical results).
+    team_color: Mapped[str | None] = mapped_column(String(6), nullable=True)
 
     session: Mapped["RaceSession"] = relationship(back_populates="drivers")
     laps: Mapped[list["Lap"]] = relationship(

@@ -20,12 +20,15 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.detection.battles import ActiveBattleService
 from app.detection.config import DetectionConfig
+from app.detection.store import DetectionContextStore
 from app.detection.worker import build_consumer as build_detection_consumer
 from app.gateway.config import GatewayConfig
 from app.gateway.gateway import WebSocketGateway
 from app.infrastructure.redis import RedisClient
 from app.main import create_app
+from app.positions.cache import PositionTrackCache
 from app.race_state.config import RaceStateConfig
 from app.race_state.repository import RaceStateStore
 from app.race_state.service import RaceStateService
@@ -254,12 +257,18 @@ async def api_env(
     )
     await state_consumer.ensure_group()
     await detection_consumer.ensure_group()
+    position_cache = PositionTrackCache(session_factory, max_gap_ms=3_000, max_sessions=4)
+    battle_service = ActiveBattleService(
+        DetectionContextStore(redis_client, stream_config=stream_config, config=DetectionConfig())
+    )
     gateway = WebSocketGateway(
         redis=redis_client,
         stream_config=stream_config,
         replay_service=replays,
         race_state_service=race_state,
         config=GatewayConfig(client_queue_size=64, send_timeout_seconds=0.5, stream_block_ms=1),
+        positions=position_cache,
+        battles=battle_service,
     )
     await gateway.start(tail=False, clock=False)
     await gateway.tail.read_once()  # position the tail at the (empty) streams' end
@@ -270,6 +279,8 @@ async def api_env(
     application.state.race_state_service = race_state
     application.state.timing_service = ReplayTimingService(replays, session_factory)
     application.state.ws_gateway = gateway
+    application.state.position_cache = position_cache
+    application.state.battle_service = battle_service
 
     async with AsyncClient(
         transport=ASGITransport(app=application), base_url="http://test"

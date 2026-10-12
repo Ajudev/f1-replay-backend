@@ -88,6 +88,7 @@ class DriverSummary(BaseModel):
     first_name: str | None
     last_name: str | None
     team_name: str | None
+    team_color: str | None = Field(default=None, description="Six hex digits without '#'")
     grid_position: int | None
     finish_position: int | None
     result_status: str | None
